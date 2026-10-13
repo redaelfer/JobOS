@@ -16,7 +16,7 @@ catch {
 const headers = { 'Content-Type': 'application/json', 'X-JobOS-Token': state.settings.token };
 const start = await fetch(base + 'codex/scan', { method: 'POST', headers, body: '{}', signal: AbortSignal.timeout(20000) });
 const started = await start.json();
-if (start.status === 409) { console.log(JSON.stringify({ skipped: true, reason: 'Codex is already processing a search or ranking.' })); process.exit(0); }
+if (start.status === 409) { console.log(JSON.stringify({ skipped: true, reason: 'An AI workflow or model download is already running.' })); process.exit(0); }
 if (!start.ok) throw new Error(started.error || 'Manual search could not start.');
 console.log(JSON.stringify({ scanId: started.id, status: 'running' }));
 const deadline = Date.now() + 45 * 60000;

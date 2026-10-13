@@ -7,6 +7,8 @@ import { dailyOpportunities, filterOpportunities, opportunityCards } from '../pu
 import { applicationContacts, applicationList, searchNowButton } from '../public/application-tools.js';
 import { orderJobs, matchesPublication } from '../public/job-order.js';
 import { tailoringPage, tailoringResult, emailDraftUrl } from '../public/tailoring-view.js';
+import { aiModelsPage, updateAIForm, modelDownloadStatus, groundingSuggestions, aiQuotaHelp } from '../public/ai-settings-view.js';
+import { publicAI, credentialStore, updateAIConfig } from '../lib/ai-config.js';
 import { buildOpportunities } from '../lib/opportunities.js';
 import { searchPreferences } from '../lib/discovery.js';
 const source = (await readFile(new URL('../public/app.js', import.meta.url), 'utf8')).replace(/^import .*;\r?\n/gm, '');
@@ -14,14 +16,22 @@ const html = await readFile(new URL('../public/index.html', import.meta.url), 'u
 const settle = async predicate => { for (let i = 0; i < 30; i++) { if (predicate()) return; await new Promise(resolve => setImmediate(resolve)); } assert.ok(predicate(), 'UI transition completed'); };
 async function setup(t, page = 'search', jobs = [], workflows = {}) {
   const settings = { resume: 'Synthetic engineer with Python and SQL software development skills.', token: 'synthetic-token', searchDomains: 'Software engineering', searchLocation: 'Morocco and remote roles', searchLevel: 'Graduate / Entry level', searchExclude: 'senior, unpaid', searchMaxAgeDays: 30, minimumFit: 70 };
-  const state = { settings, jobs, rankings: [], searches: [], scans: [], tailorings: [], companies: [], contacts: [], reminders: [], alerts: [], mailbox: {}, opportunities: buildOpportunities({ settings, jobs }), ...workflows };
-  const calls = [], intervals = [], network = { fail: false };
+  const state = { ai: publicAI({}, credentialStore(null, {})), modelDownloads: [], settings, jobs, rankings: [], searches: [], scans: [], tailorings: [], companies: [], contacts: [], reminders: [], alerts: [], mailbox: {}, opportunities: buildOpportunities({ settings, jobs }), ...workflows };
+  const calls = [], intervals = [], network = { fail: false, searchTest: null };
   const dom = new JSDOM(html, { url: 'http://jobos.test/#' + page, runScripts: 'outside-only' });
-  Object.assign(dom.window, { stages, analyzeResume, dailyOpportunities, filterOpportunities, opportunityCards, applicationContacts, applicationList, searchNowButton, orderJobs, matchesPublication, tailoringPage, tailoringResult, emailDraftUrl, setInterval: (callback, delay) => { intervals.push({ callback, delay }); return intervals.length; }, fetch: async (path, options = {}) => {
+  Object.assign(dom.window, { stages, analyzeResume, dailyOpportunities, filterOpportunities, opportunityCards, applicationContacts, applicationList, searchNowButton, orderJobs, matchesPublication, tailoringPage, tailoringResult, emailDraftUrl, aiModelsPage, updateAIForm, modelDownloadStatus, groundingSuggestions, aiQuotaHelp, setInterval: (callback, delay) => { intervals.push({ callback, delay }); return intervals.length; }, fetch: async (path, options = {}) => {
     const body = options.body ? JSON.parse(options.body) : undefined;
     calls.push({ path, method: options.method || 'GET', body });
     if (path === '/api/state' && network.fail) throw new Error('Synthetic connection loss');
     let value = state;
+    if (path === '/api/ai/config') {
+      if (body.expectedRevision !== state.ai.revision) return { ok: false, json: async () => ({ error: 'AI settings changed. Reload saved settings before saving.' }) };
+      state.ai = publicAI(updateAIConfig(state.ai, body), credentialStore(null, {})); value = state.ai;
+    }
+    if (path === '/api/ai/test') value = { ready: true, message: 'Synthetic model connection passed.' };
+    if (path === '/api/ai/search-test') value = network.searchTest || { ready: true, message: 'Synthetic live search passed.' };
+    if (path === '/api/ai/models') value = { models: ['synthetic-local-model'] };
+    if (path === '/api/ai/local/setup') { state.modelDownloads = [{ id: 'local', status: 'running', phase: 'Downloading local model', model: 'qwen3:4b', createdAt: new Date().toISOString() }]; value = { id: 'local', status: 'running' }; }
     if (path === '/api/settings') { Object.assign(settings, body); state.opportunities.maxAgeDays = settings.searchMaxAgeDays; value = settings; }
     if (path === '/api/codex/search') { const run = { id: 'synthetic-search', status: 'running', preferences: searchPreferences(body) }; state.searches = [run]; value = run; }
     if (path === '/api/codex/scan') { const run = { id: 'synthetic-scan', status: 'running', phase: 'Starting manual search workflow' }; state.scans = [run]; value = run; }
@@ -183,4 +193,136 @@ test('historical discovery results label deleted postings without offering to sa
   const { document } = await setup(t, 'search', [], { dismissedJobUrls: [url], searches: [{ id: 'old-search', status: 'completed', completedAt: new Date().toISOString(), summary: 'Historical discovery', jobs: [{ title: 'Engineer', company: 'Acme', url }] }] });
   assert.match(document.querySelector('#search-results').textContent, /Previously deleted/);
   assert.equal(document.querySelector('[data-action="save-search-job"]'), null);
+});
+
+test('AI model form switches profiles, saves private keys without echoing them and leaves workflows manual', async t => {
+  const { dom, document, calls, state } = await setup(t, 'models');
+  assert.equal(calls.filter(call => call.method === 'POST').length, 0);
+  const provider = document.querySelector('#ai-provider'); provider.value = 'gemini'; provider.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  assert.equal(document.querySelector('#ai-model').value, 'gemini-3.6-flash'); assert.equal(document.querySelector('#ai-search-provider').value, 'gemini');
+  assert.match(document.querySelector('#ai-data-note').textContent, /API server/);
+  const key = document.querySelector('[name="key-gemini"]'); key.value = 'PRIVATE_UI_KEY';
+  document.querySelector('#ai-config-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+  await settle(() => state.ai.provider === 'gemini'); await settle(() => document.querySelector('[name="key-gemini"]').value === '');
+  const request = calls.find(call => call.path === '/api/ai/config'); assert.equal(request.body.keys.gemini, 'PRIVATE_UI_KEY'); assert.equal('resume' in request.body, false);
+  assert.equal(document.body.textContent.includes('PRIVATE_UI_KEY'), false);
+  document.querySelector('[data-action="ai-test"]').click();
+  await settle(() => document.querySelector('#ai-message').textContent.includes('passed'));
+  dom.window.location.hash = '#search';
+  await settle(() => !!document.querySelector('#linkedin-search-form'));
+  assert.match(document.querySelector('#linkedin-search-form button').textContent, /Google Gemini API/);
+  assert.match(document.querySelector('#search-results').textContent, /Google Gemini API/);
+  assert.equal(calls.filter(call => ['/api/codex/scan', '/api/codex/search'].includes(call.path)).length, 0);
+});
+
+test('local model controls are explicit, show progress and block other model workflows until finished', async t => {
+  const { document, state, calls, poll } = await setup(t, 'models');
+  document.querySelector('[data-action="setup-local-model"]').click();
+  await settle(() => document.querySelector('#local-model-status').textContent.includes('Downloading local model'));
+  assert.match(document.querySelector('#workflow-status').textContent, /does not use Codex/);
+  assert.equal(calls.filter(call => call.path === '/api/ai/local/setup').length, 1);
+  assert.equal(document.querySelector('[data-action="ai-test"]').disabled, true);
+  state.modelDownloads = [{ ...state.modelDownloads[0], status: 'completed', phase: 'Local model ready.' }];
+  await poll();
+  assert.equal(document.querySelector('[data-action="ai-test"]').disabled, false);
+  assert.match(document.querySelector('#local-model-status').textContent, /Local model ready/);
+});
+
+test('an old AI settings form keeps its original revision and cannot revert a remotely updated model', async t => {
+  const ai = publicAI(updateAIConfig({}, { provider: 'gemini', searchProvider: 'gemini' }), credentialStore(null, {}));
+  const { dom, document, state, calls } = await setup(t, 'models', [], { ai });
+  const oldRevision = document.querySelector('#ai-config-form').dataset.configRevision;
+  document.querySelector('#ai-model').value = 'gemini-2.5-flash';
+  state.ai = publicAI(updateAIConfig(state.ai, { model: 'gemini-3.8-flash' }), credentialStore(null, {}));
+  document.querySelector('#ai-config-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+  await settle(() => document.querySelector('#toast').textContent.includes('Reload saved settings'));
+  assert.equal(calls.find(call => call.path === '/api/ai/config').body.expectedRevision, oldRevision);
+  assert.equal(state.ai.profiles.gemini.model, 'gemini-3.8-flash'); assert.equal(document.querySelector('#ai-model').value, 'gemini-2.5-flash');
+  document.querySelector('[data-action="ai-reload"]').click();
+  await settle(() => document.querySelector('#ai-model').value === 'gemini-3.8-flash');
+  assert.equal(document.querySelector('#ai-config-form').dataset.configRevision, state.ai.revision);
+});
+
+test('live search is tested explicitly without starting a scan or sending saved CV data', async t => {
+  const ai = publicAI(updateAIConfig({}, { provider: 'gemini', searchProvider: 'gemini' }), credentialStore(null, {}));
+  const { document, calls } = await setup(t, 'models', [], { ai });
+  assert.equal(document.querySelector('[data-action="ai-search-test"]').disabled, false);
+  document.querySelector('[data-action="ai-search-test"]').click();
+  await settle(() => document.querySelector('#ai-message').textContent.includes('live search passed'));
+  const request = calls.find(call => call.path === '/api/ai/search-test');
+  assert.deepEqual(Object.keys(request.body), ['expectedRevision']);
+  assert.equal(calls.filter(call => ['/api/codex/scan', '/api/codex/search', '/api/codex/rank'].includes(call.path)).length, 0);
+});
+
+test('a historical search failure identifies the current search model without rerunning the failed attempt', async t => {
+  const ai = publicAI(updateAIConfig({}, { provider: 'gemini', searchProvider: 'gemini' }), credentialStore(null, {}));
+  const { document, calls } = await setup(t, 'models', [], { ai, scans: [{ id: 'failed', status: 'failed', model: 'gemini-2.5-flash', createdAt: new Date().toISOString(), error: 'Gemini web search: model or endpoint not found (HTTP 404).' }] });
+  const panel = document.querySelector('#workflow-status').textContent;
+  assert.match(panel, /saved failure from that attempt/); assert.match(panel, /current Gemini search model is gemini-3\.6-flash/);
+  assert.equal(calls.filter(call => call.method === 'POST').length, 0);
+});
+
+test('a live Gemini search quota failure gives safe setup guidance without changing providers or retrying', async t => {
+  const ai = publicAI(updateAIConfig({}, { provider: 'gemini', searchProvider: 'gemini' }), credentialStore(null, {}));
+  const { document, calls, network, state } = await setup(t, 'models', [], { ai });
+  network.searchTest = { ready: false, message: 'Gemini web search · gemini-3.6-flash: usage/rate limit reached (HTTP 429).' };
+  document.querySelector('[data-action="ai-search-test"]').click();
+  await settle(() => !!document.querySelector('#ai-message .ai-quota-help'));
+  const help = document.querySelector('#ai-message .ai-quota-help');
+  assert.equal(help.querySelector('a').href, 'https://aistudio.google.com/rate-limit?timeRange=last-28-days');
+  assert.equal(help.querySelector('a').getAttribute('rel'), 'noopener noreferrer');
+  assert.match(help.textContent, /does not identify the exhausted limit or its reset time/);
+  assert.match(help.textContent, /change only Live search source/);
+  assert.match(help.textContent, /Ollama web search is a hosted API and needs its own key/);
+  assert.equal(state.ai.revision, ai.revision);
+  assert.equal(calls.filter(call => call.method !== 'GET').length, 1);
+  assert.equal(document.querySelector('[data-action="ai-search-test"]').disabled, false);
+});
+
+test('a saved Gemini quota failure links to quotas without triggering requests or mislabeling other errors', async t => {
+  const ai = publicAI(updateAIConfig({}, { provider: 'gemini', searchProvider: 'gemini' }), credentialStore(null, {}));
+  const { document, calls } = await setup(t, 'daily', [], { ai, scans: [{ id: 'limited', status: 'failed', createdAt: new Date().toISOString(), error: 'Gemini web search · gemini-3.6-flash: usage/rate limit reached (HTTP 429).' }] });
+  assert.ok(document.querySelector('#workflow-status .ai-quota-help a[href^="https://aistudio.google.com/rate-limit"]'));
+  assert.equal(calls.filter(call => call.method !== 'GET').length, 0);
+  assert.equal(aiQuotaHelp('Brave Search: usage/rate limit reached (HTTP 429).'), '');
+  assert.equal(aiQuotaHelp('Google Gemini API: usage/rate limit reached (HTTP 429).'), '');
+  assert.equal(aiQuotaHelp('Gemini web search: model or endpoint not found (HTTP 404).'), '');
+});
+
+test('selecting local model and free search saves only settings without an implicit download or scan', async t => {
+  const { document, calls, state } = await setup(t, 'models');
+  document.querySelector('[data-action="use-local-model"]').click();
+  await settle(() => state.ai.provider === 'ollama' && state.ai.searchProvider === 'linkedin');
+  await settle(() => document.querySelector('#ai-model').value === 'qwen3:4b');
+  assert.equal(document.querySelector('.ai-key-fields').hidden, true);
+  assert.equal(document.querySelector('#ai-model').value, 'qwen3:4b');
+  const mutations = calls.filter(call => call.method !== 'GET');
+  assert.equal(mutations.length, 1); assert.equal(mutations[0].path, '/api/ai/config');
+  assert.equal(mutations[0].body.searchProvider, 'linkedin'); assert.equal(mutations[0].body.keys, undefined);
+  assert.equal(document.querySelector('[data-action="ai-search-test"]').disabled, false);
+});
+
+test('local preset offers public search without keys and the local setup selector respects active workflows', async t => {
+  const { document, dom } = await setup(t, 'models');
+  document.querySelector('#ai-provider').value = 'ollama';
+  document.querySelector('#ai-provider').dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  assert.equal(document.querySelector('#ai-search-provider').value, 'linkedin');
+  assert.equal(document.querySelector('.ai-key-fields').hidden, true);
+  const busy = await setup(t, 'models', [], { modelDownloads: [{ id: 'local', status: 'running', model: 'qwen3:4b', phase: 'Downloading', createdAt: new Date().toISOString() }] });
+  assert.equal(busy.document.querySelector('[data-action="use-local-model"]').disabled, true);
+});
+
+test('a failed local generation directs users to the model test separately from website tests', async t => {
+  const ai = publicAI(updateAIConfig({}, { provider: 'ollama', searchProvider: 'linkedin' }), credentialStore(null, {}));
+  const { document, calls } = await setup(t, 'daily', [], { ai, scans: [{ id: 'local-failure', status: 'failed', createdAt: new Date().toISOString(), error: 'Ollama · local: generation exceeded 20 minutes.' }] });
+  assert.match(document.querySelector('#workflow-status').textContent, /Test saved model.*local generation/);
+  assert.match(document.querySelector('#workflow-status').textContent, /Test live search.*websites separately/);
+  assert.equal(calls.filter(call => call.method !== 'GET').length, 0);
+});
+
+test('Google grounding suggestions are contained in a sandbox without executable page markup', () => {
+  const dom = new JSDOM(groundingSuggestions(['<script>parent.evil()</script><a href="https://google.com">Google</a>']));
+  assert.equal(dom.window.document.querySelectorAll('script').length, 0);
+  const frame = dom.window.document.querySelector('iframe'); assert.equal(frame.getAttribute('sandbox'), 'allow-popups'); assert.equal(frame.getAttribute('referrerpolicy'), 'no-referrer');
+  assert.ok(frame.getAttribute('srcdoc').includes('default-src')); dom.window.close();
 });

@@ -109,6 +109,105 @@ test('direct discovery excludes deleted postings even when the provider returns 
   const result = (await request(`/api/codex/search/${start.body.id}`, 'GET', undefined, headers)).body;
   assert.equal(result.status, 'completed'); assert.equal(result.jobs.length, 1); assert.equal(result.jobs[0].url, 'https://www.linkedin.com/jobs/view/70006/');
 });
+
+test('AI configuration is token protected, keeps keys out of state/exports and routes ranking to the chosen provider', async t => {
+  const calls = [];
+  const resume = 'PRIVATE synthetic engineer with Python and SQL skills. '.repeat(800) + 'END_OF_COMPLETE_CV';
+  const { request } = await setup(t, { credentialEnv: {}, aiOptions: { fetcher: async (url, options) => {
+    calls.push({ url, options });
+    const prompt = JSON.parse(options.body).messages[0].content;
+    const data = JSON.parse(prompt.split('INPUT DATA:\n')[1]);
+    assert.equal(data.resume, resume, 'Uploaded CV input must not be silently truncated during ranking');
+    return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ summary: 'Synthetic custom-model comparison', rankings: data.jobs.map(job => ({ jobId: job.id, score: 80, fit: 'Supported skills.', strengths: [], gaps: [], nextStep: 'Review.', contacts: [] })) }) } }] }));
+  } } });
+  const initial = (await request('/api/state')).body, headers = { 'X-JobOS-Token': initial.settings.token };
+  assert.equal(initial.ai.provider, 'codex');
+  const body = { provider: 'compatible', model: 'synthetic-model', baseUrl: 'http://127.0.0.1:1234/v1', keys: { compatible: 'PRIVATE_TEST_KEY' } };
+  assert.equal((await request('/api/ai/config', 'PUT', body)).status, 401);
+  const result = await request('/api/ai/config', 'PUT', body, headers); assert.equal(result.status, 200); assert.equal(result.body.keys.compatible.configured, true);
+  assert.equal(JSON.stringify(result.body).includes('PRIVATE_TEST_KEY'), false);
+  assert.equal(JSON.stringify((await request('/api/state')).body).includes('PRIVATE_TEST_KEY'), false);
+  assert.equal(JSON.stringify((await request('/api/export')).body).includes('PRIVATE_TEST_KEY'), false);
+  assert.equal((await request('/api/ai/config', 'PUT', { provider: 'constructor', model: 'test', baseUrl: 'https://example.com' }, headers)).status, 400);
+  assert.equal((await request('/api/resume', 'POST', { filename: 'oversized.txt', contentBase64: Buffer.from(resume.repeat(2)).toString('base64') })).status, 400);
+  assert.equal((await request('/api/resume', 'POST', { filename: 'synthetic.txt', contentBase64: Buffer.from(resume).toString('base64') })).status, 200);
+  const job = (await request('/api/jobs', 'POST', { title: 'Engineer', company: 'Acme', description: 'Build production software using Python and SQL.' })).body.job;
+  const start = await request('/api/codex/rank', 'POST', { jobIds: [job.id] }, headers);
+  assert.equal(start.status, 202);
+  let run;
+  for (let attempt = 0; attempt < 40; attempt++) { run = (await request('/api/codex/rank/' + start.body.id, 'GET', undefined, headers)).body; if (run.status !== 'running') break; await new Promise(resolve => setTimeout(resolve, 5)); }
+  assert.equal(run.status, 'completed'); assert.equal(run.provider, 'compatible'); assert.equal(run.model, 'synthetic-model'); assert.equal(run.rankings.length, 1);
+  assert.equal(calls.length, 1); assert.equal(calls[0].url, 'http://127.0.0.1:1234/v1/chat/completions'); assert.equal(calls[0].options.headers.Authorization, 'Bearer PRIVATE_TEST_KEY');
+  const cleared = await request('/api/ai/config', 'PUT', { clearKeys: ['compatible'] }, headers); assert.equal(cleared.body.keys.compatible.configured, false);
+});
+
+test('provider changes, connection probes and downloads share the active workflow guard', async t => {
+  let finish;
+  const { request } = await setup(t, { credentialEnv: {}, statusChecker: async () => ({ ready: true }), ranker: () => new Promise(resolve => { finish = resolve; }), localSetup: async () => {} });
+  const headers = { 'X-JobOS-Token': (await request('/api/state')).body.settings.token };
+  await request('/api/settings', 'PUT', { resume: 'Synthetic Python engineer with software development experience.' });
+  const job = (await request('/api/jobs', 'POST', { title: 'Engineer', company: 'Acme', description: 'Build production software using Python and SQL.' })).body.job;
+  await request('/api/codex/rank', 'POST', { jobIds: [job.id] }, headers);
+  assert.equal((await request('/api/ai/config', 'PUT', { provider: 'ollama' }, headers)).status, 409);
+  assert.equal((await request('/api/ai/test', 'POST', {}, headers)).status, 409);
+  assert.equal((await request('/api/ai/search-test', 'POST', {}, headers)).status, 409);
+  assert.equal((await request('/api/ai/local/setup', 'POST', {}, headers)).status, 409);
+  finish({ summary: 'Done', rankings: [] }); await new Promise(resolve => setImmediate(resolve));
+  assert.equal((await request('/api/ai/config', 'PUT', { provider: 'ollama' }, headers)).status, 200);
+});
+
+test('an outdated settings page cannot overwrite newer model settings or credentials', async t => {
+  const { request, base } = await setup(t, { credentialEnv: {}, statusChecker: async () => ({ ready: true }) });
+  const state = (await request('/api/state')).body, headers = { 'X-JobOS-Token': state.settings.token, Origin: base };
+  const originalRevision = state.ai.revision;
+  const updated = await request('/api/ai/config', 'PUT', { expectedRevision: originalRevision, provider: 'gemini', model: 'gemini-3.6-flash', searchProvider: 'gemini', keys: { gemini: 'CURRENT_PRIVATE_KEY' } }, headers);
+  assert.equal(updated.status, 200); assert.notEqual(updated.body.revision, originalRevision);
+  const stale = await request('/api/ai/config', 'PUT', { expectedRevision: originalRevision, provider: 'gemini', model: 'gemini-2.5-flash', keys: { gemini: 'STALE_PRIVATE_KEY' } }, headers);
+  assert.equal(stale.status, 409); assert.match(stale.body.error, /Reload saved settings/);
+  assert.equal((await request('/api/ai/config', 'PUT', { provider: 'gemini', model: 'gemini-2.5-flash' }, headers)).status, 409);
+  assert.equal((await request('/api/ai/test', 'POST', { expectedRevision: originalRevision }, headers)).status, 409);
+  assert.equal((await request('/api/ai/search-test', 'POST', { expectedRevision: originalRevision }, headers)).status, 409);
+  const current = (await request('/api/ai/config', 'GET', undefined, headers)).body;
+  assert.equal(current.profiles.gemini.model, 'gemini-3.6-flash'); assert.equal(current.revision, updated.body.revision);
+  assert.equal(JSON.stringify(current).includes('PRIVATE_KEY'), false);
+});
+
+test('live search testing is authenticated, separate from generation and exposes quota failure without CV data', async t => {
+  let calls = 0, exhausted = false;
+  const { request } = await setup(t, { credentialEnv: {}, aiOptions: { fetcher: async (url, options) => {
+    calls++;
+    assert.match(url, /models\/gemini-3\.6-flash:generateContent$/);
+    const body = JSON.parse(options.body), prompt = body.contents[0].parts[0].text;
+    assert.match(prompt, /nodejs\.org/); assert.equal(prompt.includes('PRIVATE_CV'), false);
+    assert.deepEqual(body.tools, [{ google_search: {} }]);
+    if (exhausted) return new Response(JSON.stringify({ error: 'PRIVATE_PROVIDER_RESPONSE' }), { status: 429 });
+    return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify({ results: [{ title: 'Node.js', url: 'https://nodejs.org/en/docs/', content: 'Official documentation.' }] }) }] }, groundingMetadata: { groundingChunks: [{ web: { uri: 'https://nodejs.org/en/docs/' } }] } }] }));
+  } } });
+  const initial = (await request('/api/state')).body, headers = { 'X-JobOS-Token': initial.settings.token };
+  await request('/api/settings', 'PUT', { resume: 'PRIVATE_CV software engineer with Python and SQL experience.' });
+  const saved = (await request('/api/ai/config', 'PUT', { provider: 'compatible', model: 'synthetic-local-model', searchProvider: 'gemini', keys: { gemini: 'SYNTHETIC_KEY' } }, headers)).body;
+  assert.equal((await request('/api/ai/search-test', 'POST', {})).status, 401);
+  const result = await request('/api/ai/search-test', 'POST', { expectedRevision: saved.revision }, headers);
+  assert.equal(result.status, 200); assert.equal(result.body.ready, true); assert.equal(result.body.searchModel, 'gemini-3.6-flash'); assert.equal(calls, 1);
+  exhausted = true;
+  const failure = await request('/api/ai/search-test', 'POST', { expectedRevision: saved.revision }, headers);
+  assert.equal(failure.status, 200); assert.equal(failure.body.ready, false); assert.match(failure.body.message, /HTTP 429/);
+  assert.equal(failure.body.message.includes('PRIVATE_PROVIDER_RESPONSE'), false); assert.equal(calls, 2);
+  const state = (await request('/api/state')).body;
+  assert.equal(state.ai.provider, 'compatible'); assert.equal(state.jobs.length, 0); assert.equal(state.scans.length, 0); assert.equal(state.searches.length, 0); assert.equal(state.rankings.length, 0);
+});
+
+test('local setup records progress/completion and never initiates a job search or changes the provider', async t => {
+  let finish, searches = 0;
+  const { request } = await setup(t, { credentialEnv: {}, searcher: async () => { searches++; }, localSetup: (model, progress) => { assert.equal(model, 'qwen3:4b'); progress('Downloading local model · 50%'); return new Promise(resolve => { finish = resolve; }); } });
+  const headers = { 'X-JobOS-Token': (await request('/api/state')).body.settings.token };
+  assert.equal((await request('/api/ai/local/setup', 'POST', {})).status, 401);
+  const started = await request('/api/ai/local/setup', 'POST', {}, headers); assert.equal(started.status, 202);
+  let state = (await request('/api/state')).body; assert.equal(state.modelDownloads[0].status, 'running'); assert.match(state.modelDownloads[0].phase, /50%/);
+  assert.equal((await request('/api/codex/search', 'POST', { domains: 'Software engineering' }, headers)).status, 409);
+  finish(); await new Promise(resolve => setImmediate(resolve));
+  state = (await request('/api/state')).body; assert.equal(state.modelDownloads[0].status, 'completed'); assert.equal(state.ai.provider, 'codex'); assert.equal(searches, 0);
+});
 test('daily opportunities API preserves source metadata and validates saved match preferences', async t => {
   const { request } = await setup(t);
   const saved = await request('/api/jobs', 'POST', { title: 'Engineer', company: 'Acme', description: 'Develop software platforms using Python, SQL and Docker.', url: 'https://www.linkedin.com/jobs/view/111/', source: 'Codex LinkedIn search', verification: 'Title and company found on public posting', postedAt: '1 day ago' });

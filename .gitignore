@@ -1,11 +1,35 @@
+# Installed dependencies, downloads, private database and generated packages
 node_modules/
 .npm-cache/
 data/
-.env
-test-results/
-*.log
-main.tex
-.main.tex*
-main.tex.*.tmp
-
 output/
+test-results/
+coverage/
+
+# Credentials: keep only the blank, documented example
+.env
+.env.*
+!.env.example
+
+# Private master CV, backups and local LaTeX compilation artifacts
+/main.tex
+/.main.tex*
+/main.tex.*.tmp
+/main.pdf
+*.aux
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+*.toc
+*.xdv
+*.dvi
+*.out
+
+# Logs, incomplete downloads, temporary files and OS metadata
+*.log
+*.tmp
+*.part
+*.crdownload
+.DS_Store
+Thumbs.db
+Desktop.ini
