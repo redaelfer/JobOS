@@ -1,0 +1,11 @@
+node_modules/
+.npm-cache/
+data/
+.env
+test-results/
+*.log
+main.tex
+.main.tex*
+main.tex.*.tmp
+
+output/
