@@ -107,6 +107,45 @@ test('API tailoring applies text slots to the exact master and rejects template 
   await assert.rejects(backend.tailor(input));
 });
 
+test('local tailoring keeps all candidate/job facts, requests bounded edits and preserves the exact master', async () => {
+  const source = '\\documentclass{article}\n\\usepackage{xcolor}\n\\begin{document}\n\\section*{Experience}\nBuilt Python software.\n\\end{document}\n';
+  const slot = latexTextSlots(source).find(s => s.text.includes('Built Python'));
+  const output = { replacements: [{ id: slot.id, text: 'Built reliable Python software.' }], email: { subject: 'Application', body: 'Hello hiring team, I built Python software.' }, changes: ['Emphasized existing software work.'], questions: [] };
+  const backend = createAIBackend(configFor('ollama'), keys(), { fetcher: async (url, options) => {
+    assert.equal(url, 'http://127.0.0.1:11434/api/chat');
+    const body = JSON.parse(options.body), prompt = body.messages[0].content;
+    assert.equal(body.format.properties.replacements.maxItems, 1);
+    assert.deepEqual(body.format.properties.replacements.items.properties.id.enum, [slot.id]);
+    const data = JSON.parse(prompt.split('DATA:\n')[1]);
+    assert.equal(data.masterLatex, source); assert.equal(data.savedCvText, 'PRIVATE complete supporting CV.');
+    assert.equal(data.job.description, 'PRIVATE complete job requirements.');
+    assert.ok(data.textSlots.every(s => !('context' in s)));
+    return response({ done: true, done_reason: 'stop', message: { content: JSON.stringify(output) } });
+  } });
+  const result = await backend.tailor({ source, resume: 'PRIVATE complete supporting CV.', job: { description: 'PRIVATE complete job requirements.' }, language: 'English' });
+  assert.equal(result.latex, source.replace('Built Python software.', 'Built reliable Python software.'));
+  assert.equal(result.replacements.length, 1);
+});
+
+test('local structured constraints reject invented IDs, commands and oversized edit batches', async () => {
+  const { localTailoringSchema } = await import('../lib/tailoring.js');
+  const source = '\\documentclass{article}\n\\begin{document}\nOriginal CV text.\n\\end{document}';
+  const schema = localTailoringSchema(source), valid = { replacements: [{ id: 'text-001', text: 'Accurate CV text.' }], email: { subject: 'Application', body: 'Hello team.' }, changes: [], questions: [] };
+  assert.deepEqual(parseModelJSON(JSON.stringify(valid), schema), valid);
+  for (const replacement of [{ id: 'invented', text: 'No' }, { id: 'text-001', text: '\\vspace{1cm}' }, { id: 'text-001', text: 'New\nparagraph' }, { id: 'text-001', text: 'x'.repeat(501) }, { id: 'text-001', text: 'Added 2026 and 35%.' }]) {
+    assert.throws(() => parseModelJSON(JSON.stringify({ ...valid, replacements: [replacement] }), schema));
+  }
+  assert.throws(() => parseModelJSON(JSON.stringify({ ...valid, replacements: Array(9).fill(valid.replacements[0]) }), schema));
+});
+
+test('local tailoring protects role/employer headings and numeric facts while allowing descriptive sentences', async () => {
+  const { localTailoringSlots, localTailoringSchema } = await import('../lib/tailoring.js');
+  const source = '\\documentclass{article}\n\\begin{document}\n\\textbf{Data Engineer (Internship)} -- Example Employer\nData engineer diplômé avec une expérience en développement logiciel.\nGraduate engineer with a degree in computer science.\nBuilt reliable software services.\nImproved response time by 23 percent.\n\\end{document}';
+  assert.deepEqual(localTailoringSlots(source).map(s => s.text), ['Built reliable software services.']);
+  const protectedSource = '\\documentclass{article}\n\\begin{document}\nSynthetic Person\n2023 -- 2026\n\\end{document}';
+  assert.equal(localTailoringSchema(protectedSource).properties.replacements.maxItems, 0);
+});
+
 test('Brave pagination collects all pages; public queries contain only supplied professional preferences', async () => {
   const queries = searchQueries({ domains: ['Data engineering', 'Backend development'], location: 'Morocco and remote roles', level: 'Graduate / Entry level', includeEmployerSites: true, resume: 'PRIVATE CV TOKEN' });
   assert.ok(queries.some(query => query.includes('Data engineering'))); assert.ok(queries.some(query => query.includes('Backend development'))); assert.ok(queries.some(query => query.includes('remote'))); assert.ok(queries.some(query => query.includes('Maroc')));

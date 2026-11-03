@@ -33,3 +33,6 @@ coverage/
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Private CV language and field variants
+/cv-redaelferrasi/

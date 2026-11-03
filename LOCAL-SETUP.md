@@ -2,6 +2,23 @@
 
 Use **Ollama · local** for generation, rankings and CV/email drafts. The model runs on this computer and does not use Gemini or Codex requests. Local inference has no hosted AI request quota; speed, available RAM/VRAM, model context and app timeouts still apply. Finding new public offers needs internet. LinkedIn and search engines can block or limit access, independently of the local model.
 
+## If public search is blocked — updated 2026-10-21
+
+Public LinkedIn and DuckDuckGo can return a challenge, an unreadable page or a rate limit. Those are source-access failures, separately from the local model. A completed scan may still compare saved offers while discovering no new ones. Its warnings are a record of that run, not a test of the current connection.
+
+On this computer, the already-configured **Ollama web search API** passed a live public-documentation query. The saved Live search source now uses that service; generation remains **Ollama · local / qwen3:4b**. CV text is not sent to the search API. The hosted search service requires its own account/key and has separate limits; readable LinkedIn/job pages are still not guaranteed. See [Ollama's web-search documentation](https://github.com/ollama/ollama/blob/main/docs/capabilities/web-search.mdx).
+
+A subsequent manual scan saved and compared **five new recent offers**, then reported HTTP 429 from that search API. The response does not identify whether a short-term rate or usage allowance was exhausted, or when it resets. Further calls to the same service stop for that workflow. Retry manually later or select another configured search service; local CV tools remain separate. No repeat probe was sent after this confirmed limit.
+
+To check or change this yourself:
+
+1. Open **AI models** and keep **Provider: Ollama · local** and your downloaded model.
+2. Choose **Live search source: Ollama web search API**. Supply `OLLAMA_API_KEY` privately in `.env` or the form if it is not already configured. Restart the server after editing `.env`.
+3. Save, then click **Test live search**. **Test saved model** checks generation independently.
+4. Refresh the app and click **Search now** when you want a new run. No new search starts just from saving or testing settings.
+
+The **Use local model + free search** preset explicitly selects public LinkedIn/DuckDuckGo again. Keep the working API selection if those public sources are blocked. Existing saved offers, contacts and manual Chrome capture remain available.
+
 ## This computer's completed setup — 2026-10-13
 
 Ollama's verified portable Windows runtime and `qwen3:4b` are installed in this project's `data/ollama/` directory. The model download is about 2.33 GiB. JobOS is configured for **Ollama · local**, `http://127.0.0.1:11434`, 32,768 context tokens, and **Public LinkedIn + web · no API key**. Docker is not used. Existing `.env` keys were preserved and are not needed by this configuration.

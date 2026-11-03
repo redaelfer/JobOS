@@ -13,20 +13,22 @@ import { searchPreferences, hydrateSavedJobs } from './lib/discovery.js';
 import { performAutomatedScan } from './lib/automation.js';
 import { buildOpportunities } from './lib/opportunities.js';
 import { automationPreferences, preferenceFingerprint } from './lib/profile.js';
-import { cvWorkspace, validateTailoring, validateLatex, starterLatex, sourceHash } from './lib/tailoring.js';
+import { cvWorkspace, validateTailoring, validateLatex, starterLatex, sourceHash, tailoringFailure, reportCvChanges } from './lib/tailoring.js';
 import { createHash } from 'node:crypto';
+import { scanSites } from './lib/job-sites.js';
+import { validateTailoringAnalysis, tailoringAnalysisVersion } from './lib/tailoring-analysis.js';
 const root = fileURLToPath(new URL('./public/', import.meta.url));
-export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = resolve('main.tex'), artifactRoot = resolve('data/applications'), latexCompiler, tailorer, ranker, searcher, researcher, hydrator = hydrateSavedJobs, statusChecker, credentialsPath = dbPath === ':memory:' ? null : join(dirname(dbPath), 'ai-credentials.json'), aiFactory = createAIBackend, aiOptions = {}, localSetup = setupLocalModel, credentialEnv = process.env } = {}) {
+export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = resolve('main.tex'), artifactRoot = resolve('data/applications'), latexCompiler, tailorer, analyzer, ranker, searcher, researcher, hydrator = hydrateSavedJobs, statusChecker, credentialsPath = dbPath === ':memory:' ? null : join(dirname(dbPath), 'ai-credentials.json'), aiFactory = createAIBackend, aiOptions = {}, localSetup = setupLocalModel, credentialEnv = process.env } = {}) {
   const store = openStore(dbPath);
   const credentials = credentialStore(credentialsPath, credentialEnv);
   const aiSnapshot = () => publicAI(store.get('settings', 'main').ai, credentials);
-  const backend = () => { const provider = aiFactory(store.get('settings', 'main').ai, credentials, aiOptions); return { ...provider, status: statusChecker || provider.status, tailor: tailorer || provider.tailor, rank: ranker || provider.rank, search: searcher || provider.search, research: researcher || provider.research }; };
+  const backend = () => { const provider = aiFactory(store.get('settings', 'main').ai, credentials, aiOptions); return { ...provider, status: statusChecker || provider.status, tailor: tailorer || provider.tailor, analyzeTailoring: analyzer || provider.analyzeTailoring, rank: ranker || provider.rank, search: searcher || provider.search, research: researcher || provider.research }; };
   const cv = cvWorkspace(cvPath, artifactRoot, latexCompiler);
   let polling = false, mailbox = { configured: mailboxConfigured(), lastCheck: null, error: null };
   let activeRun = false;
   const postingId = url => createHash('sha256').update(jobUrl(url)).digest('hex');
   const dismissedUrls = () => store.list('dismissedJobs').map(record => record.url);
-  const isDismissed = job => { const url = typeof job === 'string' ? job : job?.url; return !!url && !!store.get('dismissedJobs', postingId(url)); };
+  const isDismissed = job => { const url = typeof job === 'string' ? job : job?.url; return !!url && (!!store.get('dismissedJobs', postingId(url)) || store.list('dismissedJobs').some(record => jobUrl(record.url) === jobUrl(url))); };
   function updateAlert(job) {
     const existing = store.list('alerts').find(a => a.jobId === job.id);
     const match = matchJob(job, store.get('settings', 'main'));
@@ -39,7 +41,7 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
     if (isDismissed(job)) return { job: null, created: false, skipped: true, reason: 'You previously deleted this posting. It will not be added again.' };
     const existing = job.url && store.list('jobs').find(j => j.url && jobUrl(j.url) === job.url);
     if (existing) {
-      if (input.descriptionVerified || (['LinkedIn email', 'Codex LinkedIn search', 'Codex employer search', 'AI LinkedIn search', 'AI employer search'].includes(existing.source) && job.source === 'LinkedIn extension') || (['Codex LinkedIn search', 'Codex employer search', 'AI LinkedIn search', 'AI employer search'].includes(existing.source) && ['Codex LinkedIn search', 'Codex employer search', 'AI LinkedIn search', 'AI employer search'].includes(job.source) && !existing.description && job.description)) {
+      if (input.descriptionVerified || (['LinkedIn email', 'Codex LinkedIn search', 'Codex employer search', 'AI LinkedIn search', 'AI employer search'].includes(existing.source) && job.source === 'LinkedIn extension') || (['Codex LinkedIn search', 'Codex employer search', 'AI LinkedIn search', 'AI employer search', 'Codex Indeed search', 'AI Indeed search'].includes(existing.source) && ['Codex LinkedIn search', 'Codex employer search', 'AI LinkedIn search', 'AI employer search', 'Codex Indeed search', 'AI Indeed search'].includes(job.source) && !existing.description && job.description)) {
         const enriched = store.put('jobs', { ...existing, ...metadata, title: job.title, company: job.company, location: job.location || existing.location, description: job.description || existing.description, lastSeenAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
         updateAlert(enriched);
         return { job: enriched, created: false, updated: true };
@@ -81,7 +83,7 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
         try { body = JSON.parse(raw || '{}'); } catch { return send(400, { error: 'Invalid JSON.' }); }
         if (!body || Array.isArray(body) || typeof body !== 'object') return send(400, { error: 'JSON object required.' });
       }
-      if (path === '/api/state' && req.method === 'GET') return send(200, { ai: aiSnapshot(), modelDownloads: store.list('modelDownloads').slice(0, 1), jobs: store.list('jobs'), dismissedJobUrls: dismissedUrls(), contacts: store.list('contacts'), reminders: store.list('reminders'), alerts: store.list('alerts'), settings: store.get('settings', 'main'), mailbox, rankings: store.list('rankings').slice(0, 10), searches: store.list('searches').slice(0, 5), companies: store.list('companies'), scans: store.list('scans').slice(0, 10), opportunities: opportunities(), tailorings: store.list('tailorings').slice(0, 20).map(({ latex, email, changes, questions, ...run }) => run) });
+      if (path === '/api/state' && req.method === 'GET') return send(200, { ai: aiSnapshot(), modelDownloads: store.list('modelDownloads').slice(0, 1), jobs: store.list('jobs'), dismissedJobUrls: dismissedUrls(), contacts: store.list('contacts'), reminders: store.list('reminders'), alerts: store.list('alerts'), settings: store.get('settings', 'main'), mailbox, rankings: store.list('rankings').slice(0, 10), searches: store.list('searches').slice(0, 5), companies: store.list('companies'), scans: store.list('scans').slice(0, 10), opportunities: opportunities(), tailorings: store.list('tailorings').slice(0, 20).map(({ latex, email, changes, questions, analysis, ...run }) => run) });
       if (path === '/api/opportunities' && req.method === 'GET') return send(200, opportunities());
       if (path === '/api/resume' && req.method === 'POST') {
         const resume = await extractResume(body);
@@ -126,6 +128,8 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
         }
         if (path === '/api/codex/tailor' && req.method === 'POST') {
           if (activeRun) return send(409, { error: 'An AI workflow or model download is already running. Wait for it to finish.' });
+          if (body.analysisOnly !== undefined && typeof body.analysisOnly !== 'boolean') throw new Error('Choose whether to analyze the offer or generate a draft.');
+          if (body.analysisId !== undefined && (typeof body.analysisId !== 'string' || body.analysisId.length > 80)) throw new Error('Invalid offer analysis reference.');
           const job = store.get('jobs', body.jobId); if (!job || job.description.length < 40) throw new Error('Choose a saved opportunity with a full description.');
           const master = await cv.load(); if (!master.exists) throw new Error('Add and save your main.tex CV first.');
           const source = validateLatex(master.source), resume = store.get('settings', 'main').resume;
@@ -135,11 +139,18 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
           if (recipientEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipientEmail)) throw new Error('Enter a valid recipient email, or leave it blank.');
           const ai = backend(), ready = await ai.status('tailor'); if (!ready.ready) return send(503, { error: ready.message });
           if (activeRun) return send(409, { error: 'An AI workflow is already running.' }); activeRun = true;
-          const run = store.put('tailorings', { provider: ai.provider, model: ai.model, providerLabel: ai.providerLabel, jobId: job.id, title: job.title, company: job.company, language, recipientEmail, recipientName, templateLocked: true, sourceHash: master.hash, resumeHash: sourceHash(resume), jobUpdatedAt: job.updatedAt, createdAt: new Date().toISOString(), status: 'running' });
-          Promise.resolve().then(() => ai.tailor({ source, resume, job, language, recipientName })).then(async output => {
-            const result = validateTailoring(output, source); const files = await cv.savePackage(run.id, result, recipientEmail);
+          const analysisOnly = body.analysisOnly === true, input = { source, resume, job, language, recipientName };
+          const cached = body.analysisId ? store.get('tailorings', body.analysisId) : null;
+          const reusable = ['completed', 'failed'].includes(cached?.status) && cached.analysisReady && cached.analysisVersion === tailoringAnalysisVersion && cached.jobId === job.id && cached.language === language && cached.sourceHash === master.hash && cached.resumeHash === sourceHash(resume) && cached.jobUpdatedAt === job.updatedAt && cached.provider === ai.provider && cached.model === ai.model;
+          let run = store.put('tailorings', { provider: ai.provider, model: ai.model, providerLabel: ai.providerLabel, mode: analysisOnly ? 'analysis' : 'draft', phase: 'Reading the offer and identifying CV/email priorities', jobId: job.id, title: job.title, company: job.company, language, recipientEmail, recipientName, templateLocked: true, sourceHash: master.hash, resumeHash: sourceHash(resume), jobUpdatedAt: job.updatedAt, createdAt: new Date().toISOString(), status: 'running' });
+          Promise.resolve().then(async () => {
+            const analysis = reusable ? cached.analysis : validateTailoringAnalysis(await ai.analyzeTailoring(input), input);
+            run = store.put('tailorings', { ...run, analysis, analysisReady: true, analysisVersion: tailoringAnalysisVersion, ...(reusable ? { analysisFromId: cached.id } : {}), phase: analysisOnly ? 'Offer analysis ready to review' : 'Writing the CV and email using the offer analysis' });
+            if (analysisOnly) return store.put('tailorings', { ...run, status: 'completed', completedAt: new Date().toISOString() });
+            const output = await ai.tailor({ ...input, analysis });
+            const result = reportCvChanges(validateTailoring(output, source), source, language); const files = await cv.savePackage(run.id, result, recipientEmail);
             store.put('tailorings', { ...run, ...result, ...files, status: 'completed', completedAt: new Date().toISOString() });
-          }).catch(() => store.put('tailorings', { ...run, status: 'failed', error: 'The CV draft could not be completed. Check the selected model connection, context size and standalone template, then retry.' })).finally(() => { activeRun = false; });
+          }).catch(error => store.put('tailorings', { ...run, status: 'failed', completedAt: new Date().toISOString(), ...tailoringFailure(error) })).finally(() => { activeRun = false; });
           return send(202, { id: run.id, status: run.status });
         }
         const tailoringMatch = path.match(/^\/api\/codex\/tailor\/([^/]+)(?:\/files\/([^/]+))?$/);
@@ -153,11 +164,14 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
           if (!file && req.method === 'PUT') {
             if (activeRun) return send(409, { error: 'Wait for the current AI workflow or model download to finish before updating a draft.' });
             if (run.status !== 'completed') throw new Error('Wait for this draft to finish.');
-            const result = validateTailoring({ ...run, latex: body.latex ?? run.latex, email: body.email ?? run.email });
+            if (run.mode === 'analysis') throw new Error('Generate a CV and email from this analysis before editing draft files.');
+            let result = validateTailoring({ ...run, latex: body.latex ?? run.latex, email: body.email ?? run.email });
             const recipientEmail = body.recipientEmail === undefined ? run.recipientEmail : clean(body.recipientEmail, 254);
             if (recipientEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipientEmail)) throw new Error('Enter a valid recipient email.');
             activeRun = true;
             try {
+              const currentMaster = await cv.load();
+              if (currentMaster.hash === run.sourceHash || body.confirmCurrentInputs) result = reportCvChanges(result, currentMaster.source, run.language);
               const files = await cv.savePackage(id, result, recipientEmail);
               const reviewedInputs = body.confirmCurrentInputs === true ? { sourceHash: (await cv.load()).hash, resumeHash: sourceHash(store.get('settings', 'main').resume), jobUpdatedAt: store.get('jobs', run.jobId)?.updatedAt } : {};
               const saved = store.put('tailorings', { ...run, ...result, ...files, ...reviewedInputs, recipientEmail, reviewedAt: new Date().toISOString() });
@@ -167,6 +181,8 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
         }
         if (path === '/api/codex/status' && req.method === 'GET') return send(200, await backend().status());
         if (path === '/api/codex/scan' && req.method === 'POST') {
+          const selectedSite = body.jobSite === undefined ? 'all' : body.jobSite;
+          scanSites(selectedSite);
           if (activeRun) return send(409, { error: 'An AI workflow or model download is already running. This scan will not start twice.' });
           const settings = store.get('settings', 'main');
           if (settings.resume.length < 40) throw new Error('Upload your CV before starting automation.');
@@ -174,9 +190,9 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
           if (activeRun) return send(409, { error: 'An AI workflow is already running.' });
           activeRun = true;
           const resumeHash = createHash('sha256').update(settings.resume).digest('hex');
-          let run = store.put('scans', { provider: ai.provider, model: ai.model, providerLabel: ai.providerLabel, status: 'running', phase: 'Starting manual search workflow', createdAt: new Date().toISOString() });
+          let run = store.put('scans', { provider: ai.provider, model: ai.model, providerLabel: ai.providerLabel, jobSite: selectedSite, status: 'running', phase: selectedSite === 'all' ? 'Starting LinkedIn, company careers and Indeed search' : selectedSite === 'indeed' ? 'Starting Indeed search workflow' : 'Starting manual search workflow', createdAt: new Date().toISOString() });
           Promise.resolve().then(() => performAutomatedScan({
-            settings: { ...settings, resumeHash, rankInputBudget: ai.inputBudget, rankBatchSize: ai.rankBatchSize }, knownJobs: store.list('jobs'), ignoredUrls: dismissedUrls(), isIgnored: isDismissed, companies: store.list('companies'), rankings: store.list('rankings'), search: ai.search, research: ai.research, rank: ai.rank, hydrate: hydrator, saveJob: ingest,
+            settings: { ...settings, resumeHash, rankInputBudget: ai.inputBudget, rankBatchSize: ai.rankBatchSize }, searchSite: selectedSite, knownJobs: store.list('jobs'), ignoredUrls: dismissedUrls(), isIgnored: isDismissed, companies: store.list('companies'), rankings: store.list('rankings'), search: ai.search, research: ai.research, rank: ai.rank, hydrate: hydrator, saveJob: ingest,
             progress: phase => { run = store.put('scans', { ...run, phase }); },
             saveCompany: company => {
               store.put('companies', { ...company, id: createHash('sha256').update(company.name.toLowerCase()).digest('hex').slice(0, 24) });
@@ -296,7 +312,7 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
       if (path === '/api/check-mail' && req.method === 'POST') { try { return send(200, await checkMail()); } catch (e) { return send(400, { error: e.message }); } }
       if (path.startsWith('/api/')) return send(404, { error: 'Route not found.' });
       if (req.method !== 'GET') return send(405, { error: 'Method not allowed.' });
-      const files = { '/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css', '/domain.js': '../lib/domain.js', '/opportunities-view.js': 'opportunities-view.js', '/application-tools.js': 'application-tools.js', '/tailoring-view.js': 'tailoring-view.js', '/job-order.js': 'job-order.js', '/ai-settings-view.js': 'ai-settings-view.js' };
+      const files = { '/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css', '/domain.js': '../lib/domain.js', '/job-sites.js': '../lib/job-sites.js', '/search-warnings.js': '../lib/search-warnings.js', '/opportunities-view.js': 'opportunities-view.js', '/application-tools.js': 'application-tools.js', '/tailoring-view.js': 'tailoring-view.js', '/job-order.js': 'job-order.js', '/ai-settings-view.js': 'ai-settings-view.js' };
       if (!files[path]) return send(404, { error: 'File not found.' });
       const content = await readFile(resolve(root, files[path]));
       res.writeHead(200, { 'Content-Type': ({ '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css' })[extname(files[path])], 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'" }); res.end(content);

@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../server.js';
 import { openStore } from '../lib/store.js';
+import { createHash } from 'node:crypto';
 async function setup(t, options = {}) {
   const app = createApp({ dbPath: ':memory:', hydrator: async () => [], ...options }); app.server.listen(0, '127.0.0.1'); await once(app.server, 'listening');
   const base = `http://127.0.0.1:${app.server.address().port}`;
@@ -87,7 +88,7 @@ test('rediscovered closed offers keep their record, notes and stage and are neve
 test('deleting an offer during a pending scan prevents late results from recreating or ranking it', async t => {
   let finish;
   const role = { title: 'Junior Software Engineer', company: 'Acme', url: 'https://www.linkedin.com/jobs/view/70004/', description: 'Develop software products using Python and SQL.', postedAt: '1 day ago' };
-  const { request } = await setup(t, { statusChecker: async () => ({ ready: true }), searcher: () => new Promise(resolve => { finish = resolve; }), researcher: async () => { throw new Error('Deleted employer must not be researched'); }, ranker: async () => { throw new Error('Deleted job must not be ranked'); } });
+  const { request } = await setup(t, { statusChecker: async () => ({ ready: true }), searcher: preferences => preferences.jobSite === 'indeed' ? Promise.resolve({ summary: 'Late second-source result', jobs: [role] }) : new Promise(resolve => { finish = resolve; }), researcher: async () => { throw new Error('Deleted employer must not be researched'); }, ranker: async () => { throw new Error('Deleted job must not be ranked'); } });
   await request('/api/settings', 'PUT', { searchDomains: 'Software engineering', resume: 'Synthetic software engineer with Python and SQL development skills.' });
   const saved = (await request('/api/jobs', 'POST', role)).body.job;
   const headers = { 'X-JobOS-Token': (await request('/api/state')).body.settings.token };
@@ -369,6 +370,70 @@ test('automated scan saves employers, contacts and CV ranking, then deduplicates
   assert.equal((await request('/api/opportunities')).body.items[0].rankingStatus, 'outdated');
   await request('/api/codex/scan', 'POST', {}, headers); state = (await request('/api/state')).body;
   assert.equal(state.rankings.length, 2); assert.equal(state.opportunities.items[0].rankingStatus, 'current');
+});
+
+test('default scan searches LinkedIn and Indeed in one guarded workflow and compares both without duplicates', async t => {
+  const calls = []; let active = 0, release, hold = true;
+  const { request } = await setup(t, {
+    statusChecker: async () => ({ ready: true }),
+    searcher: async preferences => {
+      assert.equal(active++, 0); calls.push(preferences.jobSite);
+      if (hold && preferences.jobSite === 'linkedin') await new Promise(resolve => { release = resolve; });
+      active--;
+      return { summary: 'Synthetic source', jobs: [{ title: 'Junior Software Engineer', company: 'Example Employer', location: 'Morocco', description: 'Build software services using Python, SQL and Docker in an engineering team.', postedAt: '1 day ago', url: preferences.jobSite === 'indeed' ? 'https://ma.indeed.com/viewjob?jk=0123456789abcdef' : 'https://www.linkedin.com/jobs/view/44001/' }] };
+    },
+    researcher: async () => [],
+    ranker: async ({ jobs }) => ({ summary: 'Synthetic fit', rankings: jobs.map(j => ({ jobId: j.id, score: 80, title: j.title, company: j.company, strengths: [], gaps: [], fit: 'Synthetic', nextStep: 'Review', contacts: [] })) })
+  });
+  await request('/api/settings', 'PUT', { resume: 'Synthetic engineer with Python, SQL and software development experience.', searchDomains: 'Software engineering' });
+  const initial = (await request('/api/state')).body.settings, headers = { 'X-JobOS-Token': initial.token };
+  const start = await request('/api/codex/scan', 'POST', {}, headers); assert.equal(start.status, 202);
+  assert.deepEqual(calls, ['linkedin']);
+  assert.equal((await request('/api/codex/scan', 'POST', {}, headers)).status, 409);
+  hold = false; release();
+  let state;
+  for (let tries = 0; tries < 30; tries++) { state = (await request('/api/state')).body; if (state.scans[0].status !== 'running') break; await new Promise(resolve => setImmediate(resolve)); }
+  assert.deepEqual(calls, ['linkedin', 'indeed']); assert.equal(state.scans[0].jobSite, 'all'); assert.equal(state.scans[0].status, 'completed');
+  assert.equal(state.jobs.length, 2); assert.equal(state.scans[0].newJobIds.length, 2); assert.equal(state.rankings[0].rankings.length, 2); assert.equal(state.rankings.length, 1);
+  assert.deepEqual(state.settings, initial);
+  await request('/api/codex/scan', 'POST', {}, headers);
+  state = (await request('/api/state')).body;
+  assert.equal(state.jobs.length, 2); assert.equal(state.scans[0].newJobIds.length, 0); assert.equal(state.rankings.length, 1);
+});
+
+test('Indeed scan reuses saved preferences, saves ranked offers/contacts and preserves closures and dismissal during late results', async t => {
+  const key = i => (4000 + i).toString(16).padStart(16, '0');
+  const roles = [1, 2].map(i => ({ title: 'Junior Software Engineer', company: 'Example Employer', location: 'Morocco', description: 'Develop software with Python, SQL and Docker in a junior engineering team.', url: `https://ma.indeed.com/viewjob?jk=${key(i)}&from=search`, source: 'AI Indeed search', postedAt: '1 day ago' }));
+  let hold = false, release;
+  const { request, store } = await setup(t, {
+    statusChecker: async () => ({ ready: true }),
+    searcher: async preferences => { assert.equal(preferences.jobSite, 'indeed'); assert.equal(preferences.location, 'Morocco and remote roles'); assert.equal(preferences.maxAgeDays, 14); return hold ? await new Promise(resolve => { release = resolve; }) : { summary: 'Synthetic Indeed sources', jobs: roles }; },
+    researcher: async () => [{ name: 'Example Employer', contacts: [{ email: 'careers@example.com', sourceUrl: 'https://example.com/careers', status: 'Synthetic verified source' }], recruitmentTeam: [] }],
+    ranker: async ({ resume, jobs }) => { assert.match(resume, /Synthetic/); return { summary: 'Synthetic fit', rankings: jobs.map(j => ({ jobId: j.id, score: 80, title: j.title, company: j.company, strengths: [], gaps: [], fit: 'Synthetic fit', nextStep: 'Review', contacts: [] })) }; }
+  });
+  await request('/api/settings', 'PUT', { resume: 'Synthetic engineer with Python, SQL and software development experience.', searchDomains: 'Software engineering', searchLocation: 'Morocco and remote roles', searchMaxAgeDays: 14 });
+  const initial = (await request('/api/state')).body.settings, headers = { 'X-JobOS-Token': initial.token };
+  assert.equal((await request('/api/codex/scan', 'POST', { jobSite: 'unsupported' }, headers)).status, 400);
+  const scan = await request('/api/codex/scan', 'POST', { jobSite: 'indeed' }, headers); assert.equal(scan.status, 202);
+  let state = (await request('/api/state')).body;
+  assert.equal(state.scans[0].jobSite, 'indeed'); assert.equal(state.scans[0].status, 'completed');
+  assert.equal(state.jobs.length, 2); assert.equal(state.rankings[0].rankings.length, 2); assert.equal(state.contacts.length, 1);
+  assert.deepEqual(state.settings, initial);
+  const first = state.jobs[0], second = state.jobs[1];
+  await request('/api/jobs/' + first.id, 'PATCH', { stage: 'Closed', notes: 'Keep my notes.' });
+  hold = true;
+  await request('/api/codex/scan', 'POST', { jobSite: 'indeed' }, headers);
+  assert.equal((await request('/api/codex/scan', 'POST', {}, headers)).status, 409);
+  await request('/api/jobs/' + second.id, 'DELETE');
+  release({ summary: 'Late Indeed results', jobs: roles });
+  for (let tries = 0; tries < 30; tries++) { state = (await request('/api/state')).body; if (state.scans[0].status !== 'running') break; await new Promise(resolve => setImmediate(resolve)); }
+  assert.equal(state.scans[0].status, 'completed'); assert.equal(state.jobs.length, 1);
+  assert.equal(state.jobs[0].id, first.id); assert.equal(state.jobs[0].stage, 'Closed'); assert.equal(state.jobs[0].notes, 'Keep my notes.');
+  assert.equal((await request('/api/jobs', 'POST', { ...roles.find(r => r.url.includes(key(2))), url: second.url })).body.skipped, true);
+  // Legacy dismissal records predate Indeed-specific canonicalization.
+  const legacy = `https://ma.indeed.com/rc/clk?jk=${key(3)}&from=legacy`;
+  store.put('dismissedJobs', { id: createHash('sha256').update(legacy).digest('hex'), url: legacy, deletedAt: new Date().toISOString() });
+  assert.equal((await request('/api/jobs', 'POST', { ...roles[0], url: `https://www.indeed.com/viewjob?jk=${key(3)}` })).body.skipped, true);
 });
 
 

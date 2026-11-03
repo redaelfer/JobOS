@@ -7,10 +7,12 @@ import { dailyOpportunities, filterOpportunities, opportunityCards } from '../pu
 import { applicationContacts, applicationList, searchNowButton } from '../public/application-tools.js';
 import { orderJobs, matchesPublication } from '../public/job-order.js';
 import { tailoringPage, tailoringResult, emailDraftUrl } from '../public/tailoring-view.js';
-import { aiModelsPage, updateAIForm, modelDownloadStatus, groundingSuggestions, aiQuotaHelp } from '../public/ai-settings-view.js';
+import { aiModelsPage, updateAIForm, modelDownloadStatus, groundingSuggestions, aiQuotaHelp, searchAccessHelp } from '../public/ai-settings-view.js';
+import { uniqueSearchWarnings } from '../lib/search-warnings.js';
 import { publicAI, credentialStore, updateAIConfig } from '../lib/ai-config.js';
 import { buildOpportunities } from '../lib/opportunities.js';
 import { searchPreferences } from '../lib/discovery.js';
+import { starterLatex } from '../lib/tailoring.js';
 const source = (await readFile(new URL('../public/app.js', import.meta.url), 'utf8')).replace(/^import .*;\r?\n/gm, '');
 const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
 const settle = async predicate => { for (let i = 0; i < 30; i++) { if (predicate()) return; await new Promise(resolve => setImmediate(resolve)); } assert.ok(predicate(), 'UI transition completed'); };
@@ -34,10 +36,14 @@ async function setup(t, page = 'search', jobs = [], workflows = {}) {
     if (path === '/api/ai/local/setup') { state.modelDownloads = [{ id: 'local', status: 'running', phase: 'Downloading local model', model: 'qwen3:4b', createdAt: new Date().toISOString() }]; value = { id: 'local', status: 'running' }; }
     if (path === '/api/settings') { Object.assign(settings, body); state.opportunities.maxAgeDays = settings.searchMaxAgeDays; value = settings; }
     if (path === '/api/codex/search') { const run = { id: 'synthetic-search', status: 'running', preferences: searchPreferences(body) }; state.searches = [run]; value = run; }
-    if (path === '/api/codex/scan') { const run = { id: 'synthetic-scan', status: 'running', phase: 'Starting manual search workflow' }; state.scans = [run]; value = run; }
+    if (path === '/api/codex/scan') { const run = { id: 'synthetic-scan', status: 'running', jobSite: body.jobSite || 'all', phase: 'Starting LinkedIn, company careers and Indeed search' }; state.scans = [run]; value = run; }
+    if (path === '/api/codex/cv-source') value = { source: starterLatex('Synthetic Python and SQL engineer.'), hash: 'synthetic-hash', exists: true };
+    if (path === '/api/codex/tailor') { const run = { id: 'synthetic-tailor-' + state.tailorings.length, status: 'running', mode: body.analysisOnly ? 'analysis' : 'draft', jobId: body.jobId, language: body.language, recipientName: body.recipientName, recipientEmail: body.recipientEmail, phase: 'Reading the offer and identifying CV/email priorities' }; state.tailorings = [run, ...state.tailorings]; value = run; }
+    if (path.startsWith('/api/codex/tailor/')) value = state.tailorings.find(run => run.id === path.split('/').at(-1));
     return { ok: true, json: async () => structuredClone(value) };
   } });
   t.after(async () => { await new Promise(resolve => setImmediate(resolve)); dom.window.close(); });
+  Object.assign(dom.window, { uniqueSearchWarnings, searchAccessHelp });
   dom.window.eval(source);
   await settle(() => !!dom.window.document.querySelector('h1'));
   return { dom, document: dom.window.document, calls, state, network, poll: () => intervals.find(timer => timer.delay === 3000).callback() };
@@ -55,11 +61,13 @@ test('actual search form has posting-window controls and saves them before a man
   await settle(() => calls.some(c => c.path === '/api/settings'));
   assert.equal(state.settings.searchMaxAgeDays, 7);
   document.querySelector('#linkedin-search-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
-  await settle(() => calls.some(c => c.path === '/api/codex/search'));
-  await settle(() => document.querySelector('#search-results')?.textContent.includes('Codex is searching LinkedIn'));
-  const request = calls.find(c => c.path === '/api/codex/search');
-  assert.equal(request.body.includeReview, true);
-  assert.equal(request.body.maxAgeDays, '7'); assert.equal('limit' in request.body, false); assert.equal('resume' in request.body, false);
+  await settle(() => calls.some(c => c.path === '/api/codex/scan'));
+  await settle(() => document.querySelector('#workflow-status')?.textContent.includes('LinkedIn + Indeed search in progress'));
+  const request = calls.find(c => c.path === '/api/codex/scan');
+  assert.deepEqual(request.body, { jobSite: 'all' });
+  assert.equal(state.settings.searchIncludeReview, true); assert.equal(state.settings.searchMaxAgeDays, 7);
+  assert.ok(calls.findIndex(c => c.path === '/api/settings') < calls.findIndex(c => c.path === '/api/codex/scan'));
+  assert.equal(calls.filter(c => c.path === '/api/codex/search').length, 0);
 });
 test('actual daily UI defaults to recent dates and retains historical offers through All saved', async t => {
   const stamp = new Date().toISOString();
@@ -80,6 +88,34 @@ test('actual daily UI defaults to recent dates and retains historical offers thr
   assert.equal(document.querySelectorAll('.opportunity-card').length, 1);
   assert.equal(document.querySelector('.opportunity-card').dataset.jobId, 'unknown');
 });
+
+test('tailoring UI previews the offer analysis before writing and forwards its ID without CV data', async t => {
+  const job = { id: 'job', title: 'Data Engineer', company: 'Example', description: 'Build production software using Python and SQL.', stage: 'Saved' };
+  const { dom, document, calls, state, poll } = await setup(t, 'tailor', [job]);
+  await settle(() => document.querySelector('#tex-source').value.includes('documentclass'));
+  assert.equal(calls.filter(call => call.method === 'POST').length, 0);
+  document.querySelector('#tailor-form [name="language"]').value = 'French';
+  document.querySelector('#tailor-form [name="recipientName"]').value = 'Example Recruiter';
+  document.querySelector('#tailor-form [name="recipientEmail"]').value = 'hr@example.com';
+  document.querySelector('[data-action="analyze-offer"]').click();
+  await settle(() => calls.some(call => call.path === '/api/codex/tailor'));
+  await settle(() => document.querySelector('#tailoring-result').textContent.includes('Reading the offer'));
+  const request = calls.find(call => call.path === '/api/codex/tailor');
+  assert.equal(request.body.analysisOnly, true); assert.equal('source' in request.body, false); assert.equal('resume' in request.body, false);
+  assert.equal(document.querySelector('[data-action="analyze-offer"]').disabled, true);
+  state.tailorings[0] = { ...state.tailorings[0], status: 'completed', analysisReady: true, analysis: { summary: 'Prioriser Python et SQL.', points: [{ requirement: 'Python et SQL', priority: 'required', match: 'supported', cvEvidence: 'Synthetic Python and SQL engineer.', jobEvidence: job.description, cvSource: 'master', cvAction: 'Mettre en avant le projet.', emailAction: 'Relier le projet à l’offre.' }], questions: [], warnings: [] } };
+  await poll();
+  assert.match(document.querySelector('[data-offer-analysis]').textContent, /À mettre en avant dans le CV.*Angles pour le mail/);
+  assert.equal(document.querySelector('#tailored-review-form'), null);
+  assert.equal(document.querySelector('#tailor-form [name="language"]').value, 'French');
+  assert.equal(document.querySelector('#tailor-form [name="recipientName"]').value, 'Example Recruiter');
+  assert.equal(document.querySelector('#tailor-form [name="recipientEmail"]').value, 'hr@example.com');
+  const analysisId = state.tailorings[0].id;
+  document.querySelector('#tailor-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+  await settle(() => calls.filter(call => call.path === '/api/codex/tailor').length === 2);
+  assert.equal(calls.filter(call => call.path === '/api/codex/tailor')[1].body.analysisId, analysisId);
+  assert.equal(calls.filter(call => call.path === '/api/codex/tailor')[1].body.recipientEmail, 'hr@example.com');
+});
 test('actual application button starts a manual scan only when clicked and history is renamed', async t => {
   const { document, calls } = await setup(t, 'pipeline');
   assert.equal(calls.filter(c => c.method === 'POST').length, 0);
@@ -90,6 +126,26 @@ test('actual application button starts a manual scan only when clicked and histo
   assert.equal(calls.filter(c => c.path === '/api/codex/scan').length, 1);
 });
 
+test('one search button on all main pages starts a combined workflow and shares the busy guard', async t => {
+  for (const page of ['pipeline', 'daily', 'automation']) {
+    const { document, calls, state } = await setup(t, page);
+    assert.equal(calls.filter(call => call.method !== 'GET').length, 0);
+    const preferences = JSON.stringify(state.settings);
+    assert.equal(document.querySelectorAll('[data-action="scan-now"]').length, 1);
+    assert.equal(document.querySelector('[data-action="scan-indeed"]'), null);
+    assert.match(document.querySelector('[data-action="scan-now"]').title, /LinkedIn.*Indeed/);
+    document.querySelector('[data-action="scan-now"]').click();
+    await settle(() => calls.some(call => call.path === '/api/codex/scan'));
+    await settle(() => document.querySelector('#workflow-status').textContent.includes('LinkedIn + Indeed search in progress'));
+    assert.deepEqual(calls.find(call => call.path === '/api/codex/scan').body, { jobSite: 'all' });
+    assert.equal(document.querySelector('[data-action="scan-now"]').disabled, true);
+    document.querySelector('[data-action="scan-now"]').click();
+    assert.equal(calls.filter(call => call.path === '/api/codex/scan').length, 1);
+    assert.match(document.querySelector('#workflow-status').textContent, /LinkedIn \+ Indeed search in progress/);
+    assert.equal(JSON.stringify(state.settings), preferences);
+  }
+});
+
 
 test('broader-coverage checkbox can be disabled and saves an explicit false for manual requests', async t => {
   const { dom, document, calls, state } = await setup(t);
@@ -97,8 +153,9 @@ test('broader-coverage checkbox can be disabled and saves an explicit false for 
   document.querySelector('[data-action="save-search-preferences"]').click();
   await settle(() => state.settings.searchIncludeReview === false);
   document.querySelector('#linkedin-search-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
-  await settle(() => document.querySelector('#search-results')?.textContent.includes('Codex is searching LinkedIn'));
-  assert.equal(calls.find(c => c.path === '/api/codex/search').body.includeReview, false);
+  await settle(() => document.querySelector('#workflow-status')?.textContent.includes('LinkedIn + Indeed search in progress'));
+  assert.equal(state.settings.searchIncludeReview, false);
+  assert.deepEqual(calls.find(c => c.path === '/api/codex/scan').body, { jobSite: 'all' });
 });
 
 test('active scan shows the real step and elapsed time, then clears busy state while a form remains focused', async t => {
@@ -210,7 +267,7 @@ test('AI model form switches profiles, saves private keys without echoing them a
   await settle(() => document.querySelector('#ai-message').textContent.includes('passed'));
   dom.window.location.hash = '#search';
   await settle(() => !!document.querySelector('#linkedin-search-form'));
-  assert.match(document.querySelector('#linkedin-search-form button').textContent, /Google Gemini API/);
+  assert.match(document.querySelector('#linkedin-search-form button').textContent, /Search now/);
   assert.match(document.querySelector('#search-results').textContent, /Google Gemini API/);
   assert.equal(calls.filter(call => ['/api/codex/scan', '/api/codex/search'].includes(call.path)).length, 0);
 });
@@ -325,4 +382,21 @@ test('Google grounding suggestions are contained in a sandbox without executable
   assert.equal(dom.window.document.querySelectorAll('script').length, 0);
   const frame = dom.window.document.querySelector('iframe'); assert.equal(frame.getAttribute('sandbox'), 'allow-popups'); assert.equal(frame.getAttribute('referrerpolicy'), 'no-referrer');
   assert.ok(frame.getAttribute('srcdoc').includes('default-src')); dom.window.close();
+});
+
+test('blocked source history shows limited coverage and unique warnings without editing saved records or starting a run', async t => {
+  const blocked = 'Public web search blocked this request. No challenge was bypassed.';
+  const linkedin = 'Public LinkedIn returned an unreadable listing page.';
+  const warnings = [blocked, linkedin, ...Array(7).fill('Employer research: ' + blocked)];
+  const ai = publicAI(updateAIConfig({}, { provider: 'ollama', searchProvider: 'ollama' }), credentialStore(null, { OLLAMA_API_KEY: 'SYNTHETIC_PRIVATE_KEY' }));
+  const run = { id: 'partial', status: 'completed', createdAt: new Date().toISOString(), completedAt: new Date().toISOString(), newJobIds: [], companiesResearched: 0, closedJobs: [], technologies: [], summary: 'Synthetic partial scan', warnings };
+  const { document, calls, state } = await setup(t, 'automation', [], { ai, scans: [run] });
+  assert.match(document.querySelector('#workflow-status').textContent, /completed with limited coverage/);
+  assert.match(document.querySelector('#workflow-status').textContent, /2 warnings to review/);
+  assert.match(document.querySelector('.search-access-help').textContent, /do not test your current search selection/);
+  assert.match(document.querySelector('.search-access-help').textContent, /API key is configured/);
+  assert.equal(document.querySelectorAll('#scan-result .error-inline').length, 2);
+  assert.equal(state.scans[0].warnings.length, 9);
+  assert.equal(calls.filter(call => call.method !== 'GET').length, 0);
+  assert.doesNotMatch(document.body.textContent, /SYNTHETIC_PRIVATE_KEY/);
 });
