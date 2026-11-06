@@ -85,6 +85,28 @@ test('rediscovered closed offers keep their record, notes and stage and are neve
   assert.equal(state.jobs.length, 1); assert.equal(state.jobs[0].id, saved.id); assert.equal(state.jobs[0].stage, 'Closed'); assert.equal(state.jobs[0].notes, 'Not interested; keep closed.');
 });
 
+test('one-click stage patch preserves notes and a pending search cannot reopen or duplicate the closed offer', async t => {
+  let finish;
+  const role = { title: 'Junior Software Engineer', company: 'Acme', url: 'https://www.linkedin.com/jobs/view/80004/', description: 'Develop production software using Python and SQL.', postedAt: '1 day ago', notes: 'Outside my field; keep my history.' };
+  const { request } = await setup(t, { statusChecker: async () => ({ ready: true }),
+    searcher: preferences => preferences.jobSite === 'indeed' ? Promise.resolve({ summary: 'Same posting', jobs: [role] }) : new Promise(resolve => { finish = resolve; }),
+    researcher: async () => { assert.fail('Do not research closed offers'); }, ranker: async () => { assert.fail('Do not rank closed offers'); }
+  });
+  await request('/api/settings', 'PUT', { searchDomains: 'Software engineering', resume: 'Synthetic software engineer with Python and SQL development skills.' });
+  const saved = (await request('/api/jobs', 'POST', role)).body.job;
+  const headers = { 'X-JobOS-Token': (await request('/api/state')).body.settings.token };
+  await request('/api/codex/scan', 'POST', {}, headers);
+  const closed = await request(`/api/jobs/${saved.id}`, 'PATCH', { stage: 'Closed' });
+  assert.equal(closed.status, 200); assert.equal(closed.body.notes, role.notes);
+  finish({ summary: 'Late result', jobs: [{ ...role, stage: 'Saved', notes: '' }] });
+  const state = (await request('/api/state')).body;
+  assert.equal(state.scans[0].status, 'completed'); assert.deepEqual(state.scans[0].newJobIds, []); assert.deepEqual(state.scans[0].warnings, []);
+  assert.equal(state.jobs.length, 1); assert.equal(state.jobs[0].id, saved.id);
+  assert.equal(state.jobs[0].stage, 'Closed'); assert.equal(state.jobs[0].notes, role.notes);
+  const reopened = await request(`/api/jobs/${saved.id}`, 'PATCH', { stage: 'Saved' });
+  assert.equal(reopened.body.stage, 'Saved'); assert.equal(reopened.body.notes, role.notes);
+});
+
 test('deleting an offer during a pending scan prevents late results from recreating or ranking it', async t => {
   let finish;
   const role = { title: 'Junior Software Engineer', company: 'Acme', url: 'https://www.linkedin.com/jobs/view/70004/', description: 'Develop software products using Python and SQL.', postedAt: '1 day ago' };
@@ -122,7 +144,7 @@ test('AI configuration is token protected, keeps keys out of state/exports and r
     return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ summary: 'Synthetic custom-model comparison', rankings: data.jobs.map(job => ({ jobId: job.id, score: 80, fit: 'Supported skills.', strengths: [], gaps: [], nextStep: 'Review.', contacts: [] })) }) } }] }));
   } } });
   const initial = (await request('/api/state')).body, headers = { 'X-JobOS-Token': initial.settings.token };
-  assert.equal(initial.ai.provider, 'codex');
+  assert.equal(initial.ai.provider, 'ollama');
   const body = { provider: 'compatible', model: 'synthetic-model', baseUrl: 'http://127.0.0.1:1234/v1', keys: { compatible: 'PRIVATE_TEST_KEY' } };
   assert.equal((await request('/api/ai/config', 'PUT', body)).status, 401);
   const result = await request('/api/ai/config', 'PUT', body, headers); assert.equal(result.status, 200); assert.equal(result.body.keys.compatible.configured, true);
@@ -207,8 +229,71 @@ test('local setup records progress/completion and never initiates a job search o
   let state = (await request('/api/state')).body; assert.equal(state.modelDownloads[0].status, 'running'); assert.match(state.modelDownloads[0].phase, /50%/);
   assert.equal((await request('/api/codex/search', 'POST', { domains: 'Software engineering' }, headers)).status, 409);
   finish(); await new Promise(resolve => setImmediate(resolve));
-  state = (await request('/api/state')).body; assert.equal(state.modelDownloads[0].status, 'completed'); assert.equal(state.ai.provider, 'codex'); assert.equal(searches, 0);
+  state = (await request('/api/state')).body; assert.equal(state.modelDownloads[0].status, 'completed'); assert.equal(state.ai.provider, 'ollama'); assert.equal(searches, 0);
 });
+test('explicit model download and installed selection preserve active settings until the user chooses Use', async t => {
+  let finish, downloaded = false;
+  const { request, base } = await setup(t, { credentialEnv: {}, localModels: async () => [{ name: 'qwen3:4b', size: 2500000000 }, ...(downloaded ? [{ name: 'qwen3:8b', size: 5200000000 }] : [])], localSetup: async (model, progress) => { assert.equal(model, 'qwen3:8b'); progress('Downloading local model · 50%'); await new Promise(resolve => { finish = resolve; }); downloaded = true; } });
+  const headers = { 'X-JobOS-Token': (await request('/api/state')).body.settings.token };
+  const config = (await request('/api/ai/config', 'PUT', { provider: 'gemini', searchProvider: 'searxng', keys: { gemini: 'PRIVATE_EXISTING_KEY' } }, headers)).body;
+  assert.equal((await request('/api/ai/local/models')).status, 401);
+  assert.equal((await request('/api/ai/local/models', 'GET', undefined, headers)).body.models.length, 1);
+  assert.equal((await request('/api/ai/local/setup', 'POST', { model: 'some:cloud' }, headers)).status, 400);
+  assert.equal((await request('/api/ai/local/setup', 'POST', { model: 'qwen3:8b', expectedRevision: 'stale' }, headers)).status, 409);
+  const started = await request('/api/ai/local/setup', 'POST', { model: 'qwen3:8b', expectedRevision: config.revision }, headers); assert.equal(started.status, 202);
+  assert.equal((await request('/api/ai/local/select', 'POST', { model: 'qwen3:4b' }, headers)).status, 409);
+  assert.equal((await request(`/api/ai/local/download/${started.body.id}`)).status, 401);
+  let run = (await request(`/api/ai/local/download/${started.body.id}`, 'GET', undefined, headers)).body;
+  assert.equal(run.model, 'qwen3:8b'); assert.match(run.phase, /50%/);
+  finish();
+  for (let i = 0; i < 30; i++) { run = (await request(`/api/ai/local/download/${started.body.id}`, 'GET', undefined, headers)).body; if (run.status !== 'running') break; }
+  assert.equal(run.status, 'completed');
+  const unchanged = (await request('/api/ai/config', 'GET', undefined, headers)).body;
+  assert.equal(unchanged.provider, 'gemini'); assert.equal(unchanged.searchProvider, 'searxng'); assert.equal(unchanged.profiles.ollama.model, 'qwen3:4b');
+  assert.equal((await request('/api/ai/local/select', 'POST', { model: 'not-downloaded' }, headers)).status, 400);
+  const selected = await request('/api/ai/local/select', 'POST', { model: 'qwen3:8b', expectedRevision: unchanged.revision }, headers);
+  assert.equal(selected.status, 200); assert.equal(selected.body.provider, 'ollama'); assert.equal(selected.body.profiles.ollama.model, 'qwen3:8b'); assert.equal(selected.body.searchProvider, 'searxng'); assert.equal(selected.body.keys.gemini.configured, true);
+  for (const path of ['/help-view.js', '/user-guide.md', '/freellmapi-guide.md']) { const response = await fetch(base + path); assert.equal(response.status, 200); assert.doesNotMatch(await response.text(), /PRIVATE_EXISTING_KEY/); }
+});
+test('both-source failures retain source provenance once and remain historical after search settings change', async t => {
+  const message = 'Ollama web search: usage/rate limit reached (HTTP 429).';
+  const { request } = await setup(t, { credentialEnv: {}, statusChecker: async () => ({ ready: true }), searcher: async () => { throw new Error(message); } });
+  const headers = { 'X-JobOS-Token': (await request('/api/state')).body.settings.token };
+  await request('/api/settings', 'PUT', { resume: 'Synthetic software engineer with Python and SQL development skills.' });
+  await request('/api/ai/config', 'PUT', { searchProvider: 'ollama' }, headers);
+  await request('/api/codex/scan', 'POST', {}, headers);
+  const failed = (await request('/api/state')).body.scans[0];
+  assert.equal(failed.status, 'failed'); assert.equal(failed.searchProvider, 'ollama'); assert.ok(failed.completedAt); assert.equal(failed.error.match(/HTTP 429/g).length, 1); assert.equal(failed.sourceResults.length, 2);
+  await request('/api/ai/config', 'PUT', { searchProvider: 'searxng' }, headers);
+  const now = (await request('/api/state')).body; assert.equal(now.ai.searchProvider, 'searxng'); assert.deepEqual(now.scans[0], failed);
+});
+test('local search installation is token protected, guarded and does not change providers or run searches', async t => {
+  let finish, searches = 0;
+  const { request } = await setup(t, { searcher: async () => { searches++; }, searchSetup: async progress => { progress('Synthetic container startup'); await new Promise(resolve => { finish = resolve; }); } });
+  assert.equal((await request('/api/ai/search/local/setup', 'POST', {})).status, 401);
+  const initial = (await request('/api/state')).body, headers = { 'X-JobOS-Token': initial.settings.token };
+  const started = await request('/api/ai/search/local/setup', 'POST', {}, headers); assert.equal(started.status, 202);
+  assert.equal((await request('/api/ai/config', 'PUT', { provider: 'openrouter' }, headers)).status, 409);
+  assert.equal((await request('/api/ai/local/setup', 'POST', {}, headers)).status, 409);
+  let state = (await request('/api/state')).body; assert.equal(state.modelDownloads[0].tool, 'searxng'); assert.equal(state.modelDownloads[0].phase, 'Synthetic container startup');
+  finish();
+  for (let i = 0; i < 30; i++) { state = (await request('/api/state')).body; if (state.modelDownloads[0].status !== 'running') break; }
+  assert.equal(state.modelDownloads[0].status, 'completed'); assert.equal(state.ai.provider, initial.ai.provider); assert.equal(state.ai.searchProvider, initial.ai.searchProvider); assert.equal(searches, 0);
+});
+
+test('free-provider keys entered in app persist privately and remain separate across switches and exports', async t => {
+  const { request } = await setup(t, { credentialEnv: {} });
+  const initial = (await request('/api/state')).body, headers = { 'X-JobOS-Token': initial.settings.token };
+  const openrouter = await request('/api/ai/config', 'PUT', { provider: 'openrouter', searchProvider: 'tavily', keys: { openrouter: 'PRIVATE_ROUTER_KEY', groq: 'PRIVATE_GROQ_KEY', tavily: 'PRIVATE_SEARCH_KEY' } }, headers);
+  assert.equal(openrouter.status, 200); assert.equal(openrouter.body.keys.openrouter.configured, true); assert.equal(openrouter.body.keys.tavily.source, 'saved');
+  assert.equal((await request('/api/ai/config', 'PUT', { provider: 'openrouter', model: 'vendor/paid' }, headers)).status, 400);
+  const local = await request('/api/ai/config', 'PUT', { provider: 'ollama', searchProvider: 'searxng', searchBaseUrl: 'http://127.0.0.1:8888' }, headers);
+  assert.equal(local.status, 200); assert.equal(local.body.profiles.openrouter.model, 'openrouter/free'); assert.equal(local.body.keys.groq.configured, true);
+  for (const path of ['/api/state', '/api/export', '/api/ai/config']) assert.doesNotMatch(JSON.stringify((await request(path, 'GET', undefined, headers)).body), /PRIVATE_(?:ROUTER|GROQ|SEARCH)_KEY/);
+  assert.equal((await request('/api/ai/config', 'PUT', { searchBaseUrl: 'https://remote.example' }, headers)).status, 400);
+  const cleared = await request('/api/ai/config', 'PUT', { clearKeys: ['groq'] }, headers); assert.equal(cleared.body.keys.groq.configured, false); assert.equal(cleared.body.keys.openrouter.configured, true);
+});
+
 test('daily opportunities API preserves source metadata and validates saved match preferences', async t => {
   const { request } = await setup(t);
   const saved = await request('/api/jobs', 'POST', { title: 'Engineer', company: 'Acme', description: 'Develop software platforms using Python, SQL and Docker.', url: 'https://www.linkedin.com/jobs/view/111/', source: 'Codex LinkedIn search', verification: 'Title and company found on public posting', postedAt: '1 day ago' });
@@ -455,7 +540,7 @@ test('manual scan processes 25 recent roles and saves the posting window without
   assert.ok(state.opportunities.items.every(j => j.rankingStatus === 'current'));
   assert.equal(state.opportunities.maxAgeDays, 7); assert.equal(state.opportunities.counts.pending, 0);
   assert.equal(state.scans[0].newJobIds.length, 25); assert.equal(researchCount, 8);
-  assert.deepEqual(batchSizes, [10, 10, 5]);
+  assert.deepEqual(batchSizes, Array(25).fill(1));
 });
 
 

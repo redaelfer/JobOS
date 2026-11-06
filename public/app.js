@@ -1,24 +1,37 @@
 import { stages, analyzeResume } from '/domain.js';
 import { dailyOpportunities, filterOpportunities, opportunityCards } from '/opportunities-view.js';
-import { applicationContacts, applicationList, searchNowButton } from '/application-tools.js';
+import { applicationContacts, applicationList, closeOpportunityButton, searchNowButton } from '/application-tools.js';
 import { orderJobs, matchesPublication } from '/job-order.js';
 import { tailoringPage, tailoringResult, emailDraftUrl } from '/tailoring-view.js';
-import { aiModelsPage, updateAIForm, modelDownloadStatus, groundingSuggestions, aiQuotaHelp, searchAccessHelp } from '/ai-settings-view.js';
-import { uniqueSearchWarnings } from '/search-warnings.js';
+import { aiModelsPage, updateAIForm, modelDownloadStatus, groundingSuggestions, aiQuotaHelp, searchAccessHelp, localModelCatalog } from '/ai-settings-view.js';
+import { uniqueSearchWarnings, searchSummary, searchFailureText, searchRunSource, searchSourceLabel } from '/search-warnings.js';
+import { helpPage } from '/help-view.js';
 const $ = s => document.querySelector(s);
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 let state, page = location.hash.slice(1) || 'daily', query = '', view = 'list', filter = 'All stages', jobOrder = 'newest', jobPosted = 'all', toastTimer;
 const dailyFilters = { range: 'all', mode: 'all', query: '', order: 'newest', posted: 'recent' };
 let texMaster = null, texLoading = false, texDirty = false, tailorJobId = '', tailorResult = null;
+let installedModels = [], installedModelsLoaded = false, downloadModelChoice = '';
 let connectionLost = false, lastStatusCheck = null, polling = false;
 const codexBusy = () => ['scans', 'searches', 'rankings', 'tailorings', 'modelDownloads'].some(kind => state?.[kind]?.some(r => r.status === 'running'));
 const aiName = () => state?.ai?.provider === 'codex' ? 'Codex' : state?.ai?.label || 'Codex';
+function searchAttemptNotice(run) {
+  const then = searchRunSource(run), current = state.ai?.provider === 'codex' ? 'codex' : state.ai?.searchProvider;
+  const when = Date.parse(run.createdAt) ? new Date(run.createdAt).toLocaleString() : 'Date not recorded';
+  return `<div class="help search-attempt-notice"><p>Saved search attempt: ${esc(when)}. Search used: <strong>${esc(searchSourceLabel(then))}</strong>. Current search: <strong>${esc(searchSourceLabel(current))}</strong>.</p><p>${then && then !== current ? 'Your search settings have changed since this attempt. ' : ''}This is a saved report, not a new test of your current setup. Open <a href="#models">AI models</a>, test the current model/search, then start Search now when ready. <a href="#help">Setup help</a>.</p></div>`;
+}
+async function loadInstalledModels() {
+  const result = await api('ai/local/models');
+  installedModels = result.models; installedModelsLoaded = true;
+  if ($('#installed-local-models')) $('#installed-local-models').innerHTML = localModelCatalog(installedModels, state.ai.provider === 'ollama' ? state.ai.profiles.ollama.model : '', true);
+  updateWorkflowStatus();
+}
 function updateWorkflowStatus() {
   const target = $('#workflow-status'); if (!target || !state) return;
   const tasks = ['scans', 'searches', 'rankings', 'tailorings', 'modelDownloads'].flatMap(kind => (state[kind] || []).map(run => ({ kind, run })));
   const active = tasks.find(task => task.run.status === 'running');
   const latest = active || tasks.sort((a, b) => (Date.parse(b.run.createdAt) || 0) - (Date.parse(a.run.createdAt) || 0))[0];
-  const names = { scans: latest?.run.jobSite === 'all' ? 'LinkedIn + Indeed search' : latest?.run.jobSite === 'indeed' ? 'Indeed search' : 'Search', searches: 'Job search', rankings: 'CV comparison', tailorings: latest?.run.mode === 'analysis' ? 'Offer analysis' : 'CV draft', modelDownloads: 'Local model download' };
+  const names = { scans: latest?.run.jobSite === 'all' ? 'LinkedIn + Indeed search' : latest?.run.jobSite === 'indeed' ? 'Indeed search' : 'Search', searches: 'Job search', rankings: 'CV comparison', tailorings: latest?.run.mode === 'analysis' ? 'Offer analysis' : 'CV draft', modelDownloads: latest?.run.tool === 'searxng' ? 'Local search setup' : 'Local model download' };
   const links = { scans: '#automation', searches: '#search', rankings: '#codex', tailorings: '#tailor', modelDownloads: '#models' };
   const savedWarnings = uniqueSearchWarnings(latest?.run.warnings || []);
   const accessHelp = searchAccessHelp(latest?.run.status === 'failed' ? [latest.run.error || ''] : savedWarnings, state.ai);
@@ -33,10 +46,10 @@ function updateWorkflowStatus() {
       const minutes = Math.max(0, Math.floor((Date.now() - Date.parse(run.createdAt)) / 60000));
       const elapsed = Number.isFinite(minutes) ? (minutes < 1 ? 'Less than a minute elapsed' : `${minutes} minute${minutes === 1 ? '' : 's'} elapsed`) : 'Just started';
       detail = `${run.phase || ({ scans: 'Starting the search workflow', searches: 'Searching public job postings', rankings: 'Comparing jobs with your CV', tailorings: 'Preparing your CV and email draft' })[kind]} · ${elapsed}`;
-      help = kind === 'modelDownloads' ? 'Downloading Ollama and the local model. This sends no CV data and does not use Codex.' : run.model ? `Using ${run.providerLabel || aiName()} · ${run.model}. You can keep using JobOS and this chat. Source checks and local inference can take several minutes.` : 'This is a separate background Codex run; you can keep using JobOS and this chat. A full search checks postings, researches employers and compares jobs, so it can take more than 10 minutes.';
+      help = kind === 'modelDownloads' ? run.tool === 'searxng' ? 'Installing or starting local SearXNG through Docker Desktop. No CV data is used.' : 'Downloading Ollama and the local model. This sends no CV data and does not use Codex.' : run.model ? `Using ${run.providerLabel || aiName()} · ${run.model}. You can keep using JobOS and this chat. Source checks and local inference can take several minutes.` : 'This is a separate background Codex run; you can keep using JobOS and this chat. A full search checks postings, researches employers and compares jobs, so it can take more than 10 minutes.';
     } else if (run.status === 'failed') {
       title = `${names[kind]} needs attention`;
-      detail = run.error || 'This task did not finish. Open its details before retrying.';
+      detail = (['scans', 'searches'].includes(kind) ? searchFailureText(run.error) : run.error) || 'This task did not finish. Open its details before retrying.';
       if (['scans', 'searches'].includes(kind)) help = `This is the saved failure from that attempt. ${state.ai?.searchProvider === 'gemini' ? `Your current Gemini search model is ${state.ai.searchModel}. ` : ''}${state.ai?.provider === 'codex' ? 'Check the AI connection before retrying.' : 'Test live search in AI models before retrying.'}`;
       if (['scans', 'searches'].includes(kind) && /Ollama · local|Local Ollama/.test(detail)) help = 'This is the saved failure from that attempt. Test saved model in AI models checks local generation; Test live search checks public websites separately.';
     } else if (run.status === 'completed') {
@@ -47,13 +60,15 @@ function updateWorkflowStatus() {
   }
   target.innerHTML = title ? `<section class="panel workflow-status ${connectionLost || latest?.run.status === 'failed' ? 'workflow-warning' : ''}"><div><strong>${esc(title)}</strong><p class="help">${esc(detail)}</p>${help ? `<p class="help">${esc(help)}</p>` : ''}${lastStatusCheck ? `<small class="muted">Status checked ${esc(lastStatusCheck.toLocaleTimeString())}</small>` : ''}</div><div class="actions">${!connectionLost && latest ? `<a class="btn" href="${links[latest.kind]}">View details</a>` : ''}${btn('Refresh status', 'refresh-status')}</div></section>` : '';
   if (!connectionLost && latest?.run.status === 'failed') target.querySelector('.workflow-status > div').insertAdjacentHTML('beforeend', aiQuotaHelp(latest.run.error));
+  if (!connectionLost && latest?.run.status === 'failed' && ['scans', 'searches'].includes(latest.kind)) target.querySelector('.workflow-status > div').insertAdjacentHTML('beforeend', searchAttemptNotice(latest.run));
   if (!connectionLost && accessHelp) target.querySelector('.workflow-status > div').insertAdjacentHTML('beforeend', accessHelp);
-  document.querySelectorAll('[data-action="scan-now"], #linkedin-search-form button[type="submit"], #linkedin-search-form button:not([type]), #codex-rank-form button, #tailor-form button, #ai-config-form button, [data-action="setup-local-model"], [data-action="use-local-model"]').forEach(button => { button.disabled = connectionLost || codexBusy(); });
+  document.querySelectorAll('[data-action="scan-now"], #linkedin-search-form button[type="submit"], #linkedin-search-form button:not([type]), #codex-rank-form button, #tailor-form button, #ai-config-form button, [data-action="setup-local-model"], [data-action="use-local-model"], [data-action="use-local-search"], [data-action="setup-local-search"], #local-model-download-form button, [data-action="use-installed-model"]').forEach(button => { button.disabled = connectionLost || codexBusy(); });
   const aiForm = $('#ai-config-form'), searchTest = $('[data-action="ai-search-test"]');
   if (searchTest) searchTest.disabled = connectionLost || codexBusy() || aiForm.elements.provider.value === 'codex' || aiForm.elements.searchProvider.value === 'none';
-  if (page === 'models' && $('#local-model-status')) $('#local-model-status').innerHTML = modelDownloadStatus(state.modelDownloads?.[0]);
+  if (page === 'models' && $('#local-model-status')) $('#local-model-status').innerHTML = modelDownloadStatus(state.modelDownloads?.[0]?.tool === 'searxng' ? null : state.modelDownloads?.[0]);
+  if (page === 'models' && $('#local-search-status')) $('#local-search-status').innerHTML = state.modelDownloads?.[0]?.tool === 'searxng' ? modelDownloadStatus(state.modelDownloads[0]) : '';
 }
-const titles = { models: 'AI models', tailor: 'CV & email tailoring', daily: 'Daily opportunities', pipeline: 'Applications', search: 'Job search', automation: 'Search history & employers', alerts: 'Discover & alerts', reminders: 'Follow-ups', contacts: 'People', studio: 'Career studio', codex: 'CV & AI ranking', settings: 'Settings & integrations' };
+const titles = { help: 'Help & local setup', models: 'AI models', tailor: 'CV & email tailoring', daily: 'Daily opportunities', pipeline: 'Applications', search: 'Job search', automation: 'Search history & employers', alerts: 'Discover & alerts', reminders: 'Follow-ups', contacts: 'People', studio: 'Career studio', codex: 'CV & AI ranking', settings: 'Settings & integrations' };
 async function api(path, method = 'GET', body) { const headers = body ? { 'Content-Type': 'application/json' } : {}; if (path.startsWith('codex/') || path.startsWith('ai/')) headers['X-JobOS-Token'] = state?.settings.token || ''; const res = await fetch(`/api/${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined, signal: path === 'state' ? AbortSignal.timeout(10000) : undefined }); const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Something went wrong.'); return data; }
 function toast(text) { $('#toast').textContent = text; $('#toast').classList.add('visible'); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').classList.remove('visible'), 5500); }
 async function refresh() { state = await api('state'); connectionLost = false; lastStatusCheck = new Date(); render(); }
@@ -101,7 +116,7 @@ function render() {
   $('#breadcrumb').textContent = titles[page]; $('#job-count').textContent = state.jobs.length; $('#alert-count').textContent = state.alerts.filter(a => !a.read).length;
   $('#today').textContent = new Date().toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
   document.querySelectorAll('[data-page]').forEach(el => el.classList.toggle('active', el.dataset.page === page));
-  $('#main').innerHTML = ({ models: () => aiModelsPage(state), tailor: () => tailoringPage(state, { master: texMaster, selectedJobId: tailorJobId, result: tailorResult }), daily: () => dailyOpportunities(state, dailyFilters), pipeline, alerts, reminders, contacts, studio, settings, codex, search: searchPage, automation: automationPage })[page]();
+  $('#main').innerHTML = ({ help: helpPage, models: () => aiModelsPage(state, { downloadModel: downloadModelChoice || state.ai.profiles.ollama.model, models: installedModels, loaded: installedModelsLoaded }), tailor: () => tailoringPage(state, { master: texMaster, selectedJobId: tailorJobId, result: tailorResult }), daily: () => dailyOpportunities(state, dailyFilters), pipeline, alerts, reminders, contacts, studio, settings, codex, search: searchPage, automation: automationPage })[page]();
   $('#main').insertAdjacentHTML('afterbegin', '<div id="workflow-status" role="status" aria-live="polite"></div>');
   updateWorkflowStatus();
   if (page === 'models') updateAIForm(document, state.ai);
@@ -121,7 +136,7 @@ function jobArea() {
   const scores = new Map(state.opportunities.items.map(item => [item.jobId, item]));
   const jobs = orderJobs(state.jobs.filter(j => matchesPublication(j, jobPosted) && `${j.title} ${j.company} ${j.location}`.toLowerCase().includes(query.toLowerCase()) && (filter === 'All stages' || j.stage === filter)).map(j => ({ ...j, score: scores.get(j.id)?.score, rankingStatus: scores.get(j.id)?.rankingStatus })), jobOrder);
   if (view === 'list') return jobs.length ? applicationList(jobs, state.opportunities.items, stages) : empty('⌕', 'No opportunities here yet', 'Add an opportunity or try another search.');
-  return `<div class="board">${stages.filter(s => filter === 'All stages' || s === filter).map(s => { const group = jobs.filter(j => j.stage === s); return `<section class="column"><div class="column-header"><span class="dot"></span>${s}<span class="count">${group.length}</span><button data-action="add-job" data-stage="${s}" aria-label="Add to ${s}">＋</button></div>${group.map(j => `<article class="job-card"><button class="job-card-open" data-action="edit-job" data-id="${j.id}"><div class="company-line"><span class="company-icon">${esc(j.company.slice(0, 2).toUpperCase())}</span>${esc(j.company)}</div><h3>${esc(j.title)}</h3><div class="location">${esc(j.location || 'Location not added')}</div>${j.salary ? `<div class="tags"><span class="tag">${esc(j.salary)}</span></div>` : ''}<div class="job-bottom"><span>${esc(j.source)}</span><span>${date(j.createdAt)}</span></div></button>${applicationContacts(state.opportunities.items.find(item => item.jobId === j.id), true)}<button class="btn card-tailor" data-action="prepare-job" data-id="${j.id}">Tailor CV & email</button></article>`).join('') || `<div class="empty-column">Room for your next<br>${s === 'Offer' ? 'great offer' : 'opportunity'}.</div>`}</section>`; }).join('')}</div>`;
+  return `<div class="board">${stages.filter(s => filter === 'All stages' || s === filter).map(s => { const group = jobs.filter(j => j.stage === s); return `<section class="column"><div class="column-header"><span class="dot"></span>${s}<span class="count">${group.length}</span><button data-action="add-job" data-stage="${s}" aria-label="Add to ${s}">＋</button></div>${group.map(j => `<article class="job-card"><button class="job-card-open" data-action="edit-job" data-id="${j.id}"><div class="company-line"><span class="company-icon">${esc(j.company.slice(0, 2).toUpperCase())}</span>${esc(j.company)}</div><h3>${esc(j.title)}</h3><div class="location">${esc(j.location || 'Location not added')}</div>${j.salary ? `<div class="tags"><span class="tag">${esc(j.salary)}</span></div>` : ''}<div class="job-bottom"><span>${esc(j.source)}</span><span>${date(j.createdAt)}</span></div></button>${applicationContacts(state.opportunities.items.find(item => item.jobId === j.id), true)}<button class="btn card-tailor" data-action="prepare-job" data-id="${j.id}">Tailor CV & email</button>${closeOpportunityButton(j)}</article>`).join('') || `<div class="empty-column">Room for your next<br>${s === 'Offer' ? 'great offer' : 'opportunity'}.</div>`}</section>`; }).join('')}</div>`;
 }
 function alerts() {
   const configured = state.mailbox.configured;
@@ -143,7 +158,7 @@ function searchResults() {
   const run = state.searches?.[0];
   if (!run) return empty('⌕', 'Choose a direction. Find your next role.', `Enter your professional domains above, then let ${esc(aiName())} search LinkedIn, company career pages and Indeed.`);
   if (run.status === 'running') return `<section class="panel"><h2>${esc(run.providerLabel || 'Codex')} is searching LinkedIn postings…</h2><p class="help">Looking for roles in ${esc(run.preferences.domains.join(', '))}${run.preferences.location ? ` · ${esc(run.preferences.location)}` : ''}. This screen updates automatically.</p></section>`;
-  if (run.status === 'failed') return `<section class="panel"><h2>Search could not finish</h2><p class="error-inline">${esc(run.error)}</p></section>`;
+  if (run.status === 'failed') return `<section class="panel"><h2>Saved search could not finish</h2><p class="error-inline">${esc(searchFailureText(run.error))}</p>${searchAttemptNotice(run)}</section>`;
   return `<section class="panel"><h2>${run.jobs.length} opportunit${run.jobs.length === 1 ? 'y' : 'ies'} found</h2><p class="help">${esc(run.summary)}</p><p class="help">Search completed ${esc(new Date(run.completedAt).toLocaleString())}. Open the posting to confirm it is still accepting applications.</p></section>${run.jobs.length ? run.jobs.map((j, index) => { const saved = state.jobs.find(item => item.url === j.url), dismissed = state.dismissedJobUrls?.includes(j.url); return `<section class="panel"><div class="eyebrow">${esc(j.company)}</div><h2>${esc(j.title)}</h2><p class="help">${esc(j.location || 'Location not available')}${j.postedAt ? ` · ${esc(j.postedAt)}` : ''}</p><p class="help">${esc(j.verification)}</p>${/-review$/.test(j.discoveryBucket || '') ? `<p class="help"><strong>${j.discoveryBucket === 'older-review' ? 'Older posting' : 'Date unconfirmed'}</strong> — confirm hiring is still active. ${esc(j.availabilityEvidence || '')}</p>` : ''}<blockquote class="help">${esc(j.evidence)}</blockquote><p class="help">${j.description ? 'Description available for CV comparison.' : 'Use the extension on this posting to capture its full description before ranking.'}</p><div class="actions"><a class="btn" href="${esc(j.url)}" target="_blank" rel="noopener noreferrer">Open LinkedIn posting ↗</a>${dismissed ? '<span class="help">Previously deleted — this posting will not be added again.</span>' : saved ? btn('View saved opportunity', 'edit-job', '', `data-id="${saved.id}"`) : btn('Save opportunity', 'save-search-job', 'primary', `data-run="${run.id}" data-index="${index}"`)}</div></section>`; }).join('') : empty('⌕', 'No reliable public results found', 'Try broader domains or locations, or use LinkedIn search in Chrome and capture a job with the extension.')}` + groundingSuggestions(run.searchSuggestions);
 }
 function updateSearchResults() {
@@ -161,8 +176,8 @@ function scanResult() {
   const r = saved ? { ...saved, warnings: uniqueSearchWarnings(saved.warnings || []) } : null;
   if (!r) return empty('◷', 'Ready for the next opportunity', 'The first scan will save new offers and research their employers.');
   if (r.status === 'running') return `<section class="panel"><h2>${esc(r.phase)}</h2><p class="help">The workflow is running in the background. This page updates automatically.</p></section>`;
-  if (r.status === 'failed') return `<section class="panel"><h2>Scan needs attention</h2><p class="error-inline">${esc(r.error)}</p></section>`;
-  return `<section class="panel"><h2>${r.newJobIds.length} new opportunit${r.newJobIds.length === 1 ? 'y' : 'ies'} saved</h2><p class="help">Completed ${esc(new Date(r.completedAt).toLocaleString())} · ${r.companiesResearched} employers researched · ${r.closedJobs.length} potentially closed listings skipped</p><p class="help">${esc(r.summary)}</p>${r.warnings.map(w => `<p class="error-inline">${esc(w)}</p>`).join('')}<h3>Technologies requested</h3>${r.technologies.map(item => { const j = state.jobs.find(j => j.id === item.jobId); return `<div class="row"><div><strong>${esc(j?.title || 'Saved opportunity')} · ${esc(item.company)}</strong><p>${esc(item.technologies.join(', ') || 'Full description needed to extract technologies')}</p></div>${j ? btn('View job', 'edit-job', '', `data-id="${j.id}"`) : ''}</div>`; }).join('')}</section>` + groundingSuggestions(r.searchSuggestions);
+  if (r.status === 'failed') return `<section class="panel"><h2>Saved search needs attention</h2><p class="error-inline">${esc(searchFailureText(r.error))}</p>${searchAttemptNotice(r)}</section>`;
+  return `<section class="panel"><h2>${r.newJobIds.length} new opportunit${r.newJobIds.length === 1 ? 'y' : 'ies'} saved</h2><p class="help">Completed ${esc(new Date(r.completedAt).toLocaleString())} · ${r.companiesResearched} employers researched · ${r.closedJobs.length} potentially closed listings skipped</p>${r.sourceResults?.length ? `<p class="help source-coverage">${r.sourceResults.map(source => `${source.jobSite === 'indeed' ? 'Indeed' : 'LinkedIn and company careers'}: ${source.status === 'failed' ? 'Search incomplete' : `${Number(source.jobCount) || 0} source-checked opportunities`}`).join(' · ')}</p>` : ''}<p class="help">${esc(searchSummary(r.summary, r.warnings))}</p>${r.warnings.map(w => `<p class="error-inline">${esc(w)}</p>`).join('')}<h3>Technologies requested</h3>${r.technologies.map(item => { const j = state.jobs.find(j => j.id === item.jobId); return `<div class="row"><div><strong>${esc(j?.title || 'Saved opportunity')} · ${esc(item.company)}</strong><p>${esc(item.technologies.join(', ') || 'Full description needed to extract technologies')}</p></div>${j ? btn('View job', 'edit-job', '', `data-id="${j.id}"`) : ''}</div>`; }).join('')}</section>` + groundingSuggestions(r.searchSuggestions);
 }
 function updateScanResult() {
   document.querySelectorAll('[data-action="scan-now"]').forEach(button => { button.disabled = codexBusy(); if (page === 'pipeline') button.textContent = codexBusy() ? `${aiName()} is working…` : '⌕ Search now'; });
@@ -185,7 +200,7 @@ function codexReport() {
 function field(label, name, value = '', full = false, type = 'text', required = false) { return `<label class="${full ? 'full' : ''}">${label}<input type="${type}" name="${name}" value="${esc(value)}" ${required ? 'required' : ''}></label>`; }
 function jobModal(id, stage = 'Saved') {
   const j = state.jobs.find(j => j.id === id) || { stage };
-  modal(id ? 'Opportunity details' : 'A new possibility', `<form id="job-form" data-id="${id || ''}" class="form-grid">${field('Job title', 'title', j.title, false, 'text', true)}${field('Company', 'company', j.company, false, 'text', true)}${field('Location', 'location', j.location)}${field('Salary / compensation', 'salary', j.salary)}${field('Job URL', 'url', j.url, true, 'url')}<label>Stage<select name="stage">${options(stages, j.stage)}</select></label>${field('Source', 'source', j.source || 'Manual')}<label class="full">Job description<textarea name="description" rows="5">${esc(j.description)}</textarea></label><label class="full">Your notes<textarea name="notes">${esc(j.notes)}</textarea></label><div class="actions full"><button class="btn primary">${id ? 'Save changes' : 'Save opportunity'}</button>${id ? `${btn('Plan follow-up', 'job-reminder', '', `data-id="${id}"`)}${j.url ? `<a class="btn" href="${esc(j.url)}" target="_blank" rel="noopener noreferrer">Open posting ↗</a>` : ''}${btn('Delete', 'delete-job', 'danger', `data-id="${id}"`)}` : ''}</div></form>${id ? applicationContacts(state.opportunities.items.find(item => item.jobId === id)) + `<div class="actions">${btn('Tailor CV & email', 'prepare-job', 'primary', `data-id="${id}"`)}</div>` : ''}`);
+  modal(id ? 'Opportunity details' : 'A new possibility', `<form id="job-form" data-id="${id || ''}" class="form-grid">${field('Job title', 'title', j.title, false, 'text', true)}${field('Company', 'company', j.company, false, 'text', true)}${field('Location', 'location', j.location)}${field('Salary / compensation', 'salary', j.salary)}${field('Job URL', 'url', j.url, true, 'url')}<label>Stage<select name="stage">${options(stages, j.stage)}</select></label>${field('Source', 'source', j.source || 'Manual')}<label class="full">Job description<textarea name="description" rows="5">${esc(j.description)}</textarea></label><label class="full">Your notes<textarea name="notes">${esc(j.notes)}</textarea></label><div class="actions full"><button class="btn primary">${id ? 'Save changes' : 'Save opportunity'}</button>${id ? `${btn('Plan follow-up', 'job-reminder', '', `data-id="${id}"`)}${j.url ? `<a class="btn" href="${esc(j.url)}" target="_blank" rel="noopener noreferrer">Open posting ↗</a>` : ''}${closeOpportunityButton(j)}${btn('Delete', 'delete-job', 'danger', `data-id="${id}"`)}` : ''}</div></form>${id ? applicationContacts(state.opportunities.items.find(item => item.jobId === id)) + `<div class="actions">${btn('Tailor CV & email', 'prepare-job', 'primary', `data-id="${id}"`)}</div>` : ''}`);
 }
 function reminderModal(jobId = '') { modal('Make time for a follow-up', `<form id="reminder-form" class="form-grid">${field('What would you like to do?', 'title', '', true, 'text', true)}${field('When', 'dueAt', '', true, 'datetime-local', true)}<label class="full">Related opportunity<select name="jobId"><option value="">General reminder</option>${state.jobs.map(j => `<option value="${j.id}" ${j.id === jobId ? 'selected' : ''}>${esc(j.title)} — ${esc(j.company)}</option>`).join('')}</select></label><div class="full"><button class="btn primary">Save follow-up</button></div></form>`); }
 function contactModal(id) { const c = state.contacts.find(c => c.id === id) || {}; modal(id ? 'Edit contact' : 'A new connection', `<form id="contact-form" data-id="${id || ''}" class="form-grid">${field('Name', 'name', c.name, false, 'text', true)}${field('Company', 'company', c.company)}${field('Role', 'role', c.role)}${field('Email', 'email', c.email, false, 'email')}${field('LinkedIn / profile URL', 'linkedin', c.linkedin, true, 'url')}<label class="full">Notes<textarea name="notes">${esc(c.notes)}</textarea></label><div class="actions full"><button class="btn primary">Save contact</button>${id ? btn('Delete', 'delete-contact', 'danger', `data-id="${id}"`) : ''}</div></form>`); }
@@ -206,7 +221,22 @@ document.addEventListener('click', async e => {
       await api('ai/config', 'PUT', { expectedRevision: form.dataset.configRevision, provider: 'ollama', model: profile.model, baseUrl: profile.baseUrl, contextTokens: state.ai.contextTokens, searchProvider: 'linkedin' });
       await refresh(); return toast('Local Ollama and public search selected. Test the model and live search before use.');
     }
+    if (action === 'use-local-search') {
+      const form = $('#ai-config-form'), profile = state.ai.profiles.ollama;
+      await api('ai/config', 'PUT', { expectedRevision: form.dataset.configRevision, provider: 'ollama', model: profile.model, baseUrl: profile.baseUrl, contextTokens: state.ai.contextTokens, searchProvider: 'searxng', searchBaseUrl: 'http://127.0.0.1:8888' });
+      await refresh(); return toast('Local model and local SearXNG selected. Start local search and test both connections.');
+    }
+    if (action === 'choose-ai-provider') {
+      $('#ai-provider').value = el.dataset.provider; updateAIForm(document, state.ai, true);
+      $(`[name="key-${el.dataset.provider}"]`).focus(); return toast('Enter your own API key, then Save AI settings and test. Free services have quotas.');
+    }
+    if (action === 'setup-local-search') { el.disabled = true; await api('ai/search/local/setup', 'POST', {}); await refresh(); return toast('Local search setup started. Start Docker Desktop if setup requests it.'); }
     if (action === 'setup-local-model') { el.disabled = true; await api('ai/local/setup', 'POST', {}); await refresh(); return toast('Local setup started. Progress appears in AI models.'); }
+    if (action === 'local-models-refresh') { el.disabled = true; try { await loadInstalledModels(); return toast('Installed models refreshed.'); } finally { el.disabled = codexBusy(); } }
+    if (action === 'use-installed-model') {
+      await api('ai/local/select', 'POST', { model: el.dataset.model, expectedRevision: state.ai.revision });
+      await refresh(); return toast('Downloaded model selected. Search settings kept. Test saved model before use.');
+    }
     if (action === 'refresh-status') { await backgroundRefresh(false); return; }
     if (action === 'scan-now') { document.querySelectorAll('[data-action="scan-now"]').forEach(button => { button.disabled = true; }); await api('codex/scan', 'POST', { jobSite: 'all' }); await refresh(); return toast('Search started now. LinkedIn, company careers and Indeed use your saved preferences.'); }
     if (action === 'publication-view') { dailyFilters.posted = el.dataset.view; $('#daily-posted').value = dailyFilters.posted; return updateDailyCards(); }
@@ -231,6 +261,15 @@ document.addEventListener('click', async e => {
     if (action === 'close') return $('#modal').close();
     if (action === 'add-job') return jobModal(null, el.dataset.stage);
     if (action === 'edit-job') return jobModal(id);
+    if (action === 'close-job') {
+      if (state.jobs.find(job => job.id === id)?.stage === 'Closed') return;
+      el.disabled = true;
+      try {
+        await api(`jobs/${id}`, 'PATCH', { stage: 'Closed' });
+        if ($('#modal').open) $('#modal').close();
+        await refresh(); return toast('Opportunity closed. History and notes kept; reopen with the Stage menu.');
+      } finally { el.disabled = false; }
+    }
     if (action === 'add-contact' || action === 'edit-contact') return contactModal(id);
     if (action === 'add-reminder') return reminderModal();
     if (action === 'job-reminder') { $('#modal').close(); return reminderModal(id); }
@@ -251,10 +290,15 @@ document.addEventListener('click', async e => {
 document.addEventListener('submit', async e => {
   e.preventDefault(); const form = e.target, values = Object.fromEntries(new FormData(form)), submit = form.querySelector('[type="submit"],button:not([type])'); if (submit) submit.disabled = true;
   try {
+    if (form.id === 'local-model-download-form') {
+      downloadModelChoice = values.downloadModel;
+      await api('ai/local/setup', 'POST', { model: values.downloadModel, expectedRevision: state.ai.revision });
+      await refresh(); if (!codexBusy()) await loadInstalledModels(); toast('Model download started. Progress appears below; your active model is unchanged.');
+    }
     if (form.id === 'ai-config-form') {
       const keys = {}, clearKeys = [];
-      for (const name of ['gemini', 'kimi', 'compatible', 'ollamaSearch', 'brave']) { if (values[`key-${name}`]) keys[name] = values[`key-${name}`]; if (form.elements[`clear-${name}`].checked) clearKeys.push(name); }
-      await api('ai/config', 'PUT', { expectedRevision: form.dataset.configRevision, provider: values.provider, model: values.model, baseUrl: values.baseUrl, contextTokens: Number(values.contextTokens), searchProvider: form.elements.searchProvider.value, searchModel: values.searchModel, keys, clearKeys }); await refresh(); toast('AI provider saved. Test the model and live search before your next workflow.');
+      for (const name of Object.keys(state.ai.keys)) { if (values[`key-${name}`]) keys[name] = values[`key-${name}`]; if (form.elements[`clear-${name}`].checked) clearKeys.push(name); }
+      await api('ai/config', 'PUT', { expectedRevision: form.dataset.configRevision, provider: values.provider, model: values.model, baseUrl: values.baseUrl, contextTokens: Number(values.contextTokens), searchProvider: form.elements.searchProvider.value, searchModel: values.searchModel, searchBaseUrl: values.searchBaseUrl, keys, clearKeys }); await refresh(); toast('AI provider saved. Test the model and live search before your next workflow.');
     }
     if (form.id === 'tex-source-form') { await saveTex(); toast('Master CV saved.'); }
     if (form.id === 'tailor-form') {
@@ -350,6 +394,7 @@ setInterval(async () => {
     const next = await api('state');
     connectionLost = false; lastStatusCheck = new Date();
     const scanFinished = state.scans?.some(r => r.status === 'running') && !next.scans.some(r => r.status === 'running');
+    const modelFinished = state.modelDownloads?.some(r => r.status === 'running' && r.tool !== 'searxng') && next.modelDownloads?.some(r => r.status === 'completed' && r.tool !== 'searxng');
     state.rankings = next.rankings; state.searches = next.searches; state.scans = next.scans; state.tailorings = next.tailorings; state.modelDownloads = next.modelDownloads;
     if (['daily', 'pipeline', 'automation'].includes(page) && !$('#modal').open && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) { state = next; render(); }
     await updateTailoring(next);
@@ -361,6 +406,7 @@ setInterval(async () => {
       const running = state.rankings.some(r => r.status === 'running'); button.disabled = running; button.textContent = running ? `${aiName()} is analyzing…` : `Send to ${aiName()} & rank`;
     }
     updateWorkflowStatus();
+    if (modelFinished && page === 'models') await loadInstalledModels();
   } catch { connectionLost = true; updateWorkflowStatus(); }
   finally { polling = false; }
 }, 3000);

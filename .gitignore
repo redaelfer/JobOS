@@ -36,3 +36,7 @@ Desktop.ini
 
 # Private CV language and field variants
 /cv-redaelferrasi/
+
+# Separately cloned upstream gateway; keep its checkout/dependencies out of JobOS Git
+/integrations/freellmapi/
+/freellmapi/upstream/

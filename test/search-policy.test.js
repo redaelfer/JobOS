@@ -47,7 +47,9 @@ test('source checks replace claimed ages with displayed posting dates and reject
 });
 
 test('manual workflow researches and ranks all 24 jobs in bounded sequential batches', async () => {
-  const jobs = Array.from({ length: 24 }, (_, i) => ({ ...posting(i), id: `job-${i}`, company: `Employer-${i % 8}`, stage: 'Saved', updatedAt: 'same' }));
+  // This checks batching against the workflow's real clock, not the fixed
+  // October clock used by the publication-policy cases above.
+  const jobs = Array.from({ length: 24 }, (_, i) => ({ ...posting(i, { sourceCheckedAt: new Date().toISOString() }), id: `job-${i}`, company: `Employer-${i % 8}`, stage: 'Saved', updatedAt: 'same' }));
   const settings = { resume: 'Synthetic software engineer with Python, APIs and SQL experience.', resumeHash: 'synthetic', searchDomains: 'Software engineering' };
   const researchSizes = [], rankSizes = [], saved = [];
   let active = 0;

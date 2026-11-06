@@ -4,27 +4,32 @@ import { readFile } from 'node:fs/promises';
 import { JSDOM } from 'jsdom';
 import { stages, analyzeResume } from '../lib/domain.js';
 import { dailyOpportunities, filterOpportunities, opportunityCards } from '../public/opportunities-view.js';
-import { applicationContacts, applicationList, searchNowButton } from '../public/application-tools.js';
+import { applicationContacts, applicationList, closeOpportunityButton, searchNowButton } from '../public/application-tools.js';
 import { orderJobs, matchesPublication } from '../public/job-order.js';
 import { tailoringPage, tailoringResult, emailDraftUrl } from '../public/tailoring-view.js';
-import { aiModelsPage, updateAIForm, modelDownloadStatus, groundingSuggestions, aiQuotaHelp, searchAccessHelp } from '../public/ai-settings-view.js';
-import { uniqueSearchWarnings } from '../lib/search-warnings.js';
+import { aiModelsPage, updateAIForm, modelDownloadStatus, groundingSuggestions, aiQuotaHelp, searchAccessHelp, localModelCatalog } from '../public/ai-settings-view.js';
+import { uniqueSearchWarnings, searchSummary, searchFailureText, searchRunSource, searchSourceLabel } from '../lib/search-warnings.js';
 import { publicAI, credentialStore, updateAIConfig } from '../lib/ai-config.js';
 import { buildOpportunities } from '../lib/opportunities.js';
 import { searchPreferences } from '../lib/discovery.js';
 import { starterLatex } from '../lib/tailoring.js';
+import { helpPage } from '../public/help-view.js';
 const source = (await readFile(new URL('../public/app.js', import.meta.url), 'utf8')).replace(/^import .*;\r?\n/gm, '');
 const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
 const settle = async predicate => { for (let i = 0; i < 30; i++) { if (predicate()) return; await new Promise(resolve => setImmediate(resolve)); } assert.ok(predicate(), 'UI transition completed'); };
 async function setup(t, page = 'search', jobs = [], workflows = {}) {
   const settings = { resume: 'Synthetic engineer with Python and SQL software development skills.', token: 'synthetic-token', searchDomains: 'Software engineering', searchLocation: 'Morocco and remote roles', searchLevel: 'Graduate / Entry level', searchExclude: 'senior, unpaid', searchMaxAgeDays: 30, minimumFit: 70 };
   const state = { ai: publicAI({}, credentialStore(null, {})), modelDownloads: [], settings, jobs, rankings: [], searches: [], scans: [], tailorings: [], companies: [], contacts: [], reminders: [], alerts: [], mailbox: {}, opportunities: buildOpportunities({ settings, jobs }), ...workflows };
-  const calls = [], intervals = [], network = { fail: false, searchTest: null };
+  const calls = [], intervals = [], network = { fail: false, searchTest: null, jobPatchError: '', localModels: [{ name: 'qwen3:4b', size: 2500000000, parameters: '4B' }] };
   const dom = new JSDOM(html, { url: 'http://jobos.test/#' + page, runScripts: 'outside-only' });
   Object.assign(dom.window, { stages, analyzeResume, dailyOpportunities, filterOpportunities, opportunityCards, applicationContacts, applicationList, searchNowButton, orderJobs, matchesPublication, tailoringPage, tailoringResult, emailDraftUrl, aiModelsPage, updateAIForm, modelDownloadStatus, groundingSuggestions, aiQuotaHelp, setInterval: (callback, delay) => { intervals.push({ callback, delay }); return intervals.length; }, fetch: async (path, options = {}) => {
     const body = options.body ? JSON.parse(options.body) : undefined;
     calls.push({ path, method: options.method || 'GET', body });
     if (path === '/api/state' && network.fail) throw new Error('Synthetic connection loss');
+    if (path.startsWith('/api/jobs/') && options.method === 'PATCH') {
+      if (network.jobPatchError) return { ok: false, json: async () => ({ error: network.jobPatchError }) };
+      Object.assign(state.jobs.find(job => job.id === path.split('/').at(-1)), body);
+    }
     let value = state;
     if (path === '/api/ai/config') {
       if (body.expectedRevision !== state.ai.revision) return { ok: false, json: async () => ({ error: 'AI settings changed. Reload saved settings before saving.' }) };
@@ -33,7 +38,10 @@ async function setup(t, page = 'search', jobs = [], workflows = {}) {
     if (path === '/api/ai/test') value = { ready: true, message: 'Synthetic model connection passed.' };
     if (path === '/api/ai/search-test') value = network.searchTest || { ready: true, message: 'Synthetic live search passed.' };
     if (path === '/api/ai/models') value = { models: ['synthetic-local-model'] };
-    if (path === '/api/ai/local/setup') { state.modelDownloads = [{ id: 'local', status: 'running', phase: 'Downloading local model', model: 'qwen3:4b', createdAt: new Date().toISOString() }]; value = { id: 'local', status: 'running' }; }
+    if (path === '/api/ai/local/models') value = { models: network.localModels };
+    if (path === '/api/ai/local/select') { state.ai = publicAI(updateAIConfig(state.ai, { provider: 'ollama', model: body.model }), credentialStore(null, {})); value = state.ai; }
+    if (path === '/api/ai/local/setup') { state.modelDownloads = [{ id: 'local', status: 'running', phase: 'Downloading local model', model: body.model || 'qwen3:4b', createdAt: new Date().toISOString() }]; value = { id: 'local', status: 'running' }; }
+    if (path === '/api/ai/search/local/setup') { state.modelDownloads = [{ id: 'local-search', status: 'running', tool: 'searxng', phase: 'Starting local search', model: 'SearXNG', createdAt: new Date().toISOString() }]; value = { id: 'local-search', status: 'running' }; }
     if (path === '/api/settings') { Object.assign(settings, body); state.opportunities.maxAgeDays = settings.searchMaxAgeDays; value = settings; }
     if (path === '/api/codex/search') { const run = { id: 'synthetic-search', status: 'running', preferences: searchPreferences(body) }; state.searches = [run]; value = run; }
     if (path === '/api/codex/scan') { const run = { id: 'synthetic-scan', status: 'running', jobSite: body.jobSite || 'all', phase: 'Starting LinkedIn, company careers and Indeed search' }; state.scans = [run]; value = run; }
@@ -43,7 +51,7 @@ async function setup(t, page = 'search', jobs = [], workflows = {}) {
     return { ok: true, json: async () => structuredClone(value) };
   } });
   t.after(async () => { await new Promise(resolve => setImmediate(resolve)); dom.window.close(); });
-  Object.assign(dom.window, { uniqueSearchWarnings, searchAccessHelp });
+  Object.assign(dom.window, { uniqueSearchWarnings, searchSummary, searchFailureText, searchRunSource, searchSourceLabel, searchAccessHelp, closeOpportunityButton, localModelCatalog, helpPage });
   dom.window.eval(source);
   await settle(() => !!dom.window.document.querySelector('h1'));
   return { dom, document: dom.window.document, calls, state, network, poll: () => intervals.find(timer => timer.delay === 3000).callback() };
@@ -87,6 +95,36 @@ test('actual daily UI defaults to recent dates and retains historical offers thr
   selector.value = 'unknown'; selector.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
   assert.equal(document.querySelectorAll('.opportunity-card').length, 1);
   assert.equal(document.querySelector('.opportunity-card').dataset.jobId, 'unknown');
+});
+for (const layout of ['list', 'board']) test(`Applications ${layout} closes an offer directly and can reopen it without deleting history`, async t => {
+  const job = { id: 'close-me', title: 'Junior <Engineer>', company: 'Acme', location: 'Rabat', source: 'Manual', stage: 'Saved', notes: 'Not my domain.', description: 'Develop software in Python.' };
+  const { dom, document, calls, state } = await setup(t, 'pipeline', [job]);
+  if (layout === 'board') document.querySelector('[data-action="board-view"]').click();
+  const close = document.querySelector('[data-action="close-job"]');
+  assert.ok(close); assert.match(close.getAttribute('aria-label'), /Junior <Engineer>/);
+  close.click(); close.click();
+  await settle(() => !document.querySelector('[data-action="close-job"]'));
+  const mutations = calls.filter(call => call.method !== 'GET');
+  assert.deepEqual(mutations, [{ path: '/api/jobs/close-me', method: 'PATCH', body: { stage: 'Closed' } }]);
+  assert.equal(state.jobs.length, 1); assert.equal(state.jobs[0].notes, 'Not my domain.'); assert.equal(state.jobs[0].stage, 'Closed');
+  assert.match(document.querySelector('#toast').textContent, /History and notes kept/);
+  if (layout === 'board') document.querySelector('[data-action="list-view"]').click();
+  const stage = document.querySelector('[data-stage-job="close-me"]'); assert.equal(stage.value, 'Closed');
+  stage.value = 'Saved'; stage.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  await settle(() => !!document.querySelector('[data-action="close-job"]'));
+  assert.equal(state.jobs[0].stage, 'Saved'); assert.equal(state.jobs[0].notes, 'Not my domain.');
+  assert.equal(calls.filter(call => call.method === 'DELETE' || call.path === '/api/codex/scan').length, 0);
+});
+
+test('failed Close request keeps the current stage and permits retry', async t => {
+  const job = { id: 'close-me', title: 'Engineer', company: 'Acme', stage: 'Saved', notes: 'Keep me.' };
+  const { document, state, network } = await setup(t, 'pipeline', [job]);
+  network.jobPatchError = 'Synthetic stage save failed';
+  const button = document.querySelector('[data-action="close-job"]'); button.click();
+  await settle(() => document.querySelector('#toast').textContent === network.jobPatchError);
+  assert.equal(button.disabled, false); assert.equal(state.jobs[0].stage, 'Saved'); assert.equal(state.jobs[0].notes, 'Keep me.');
+  network.jobPatchError = ''; button.click();
+  await settle(() => state.jobs[0].stage === 'Closed');
 });
 
 test('tailoring UI previews the offer analysis before writing and forwards its ID without CV data', async t => {
@@ -256,7 +294,7 @@ test('AI model form switches profiles, saves private keys without echoing them a
   const { dom, document, calls, state } = await setup(t, 'models');
   assert.equal(calls.filter(call => call.method === 'POST').length, 0);
   const provider = document.querySelector('#ai-provider'); provider.value = 'gemini'; provider.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
-  assert.equal(document.querySelector('#ai-model').value, 'gemini-3.6-flash'); assert.equal(document.querySelector('#ai-search-provider').value, 'gemini');
+  assert.equal(document.querySelector('#ai-model').value, 'gemini-3.6-flash'); assert.equal(document.querySelector('#ai-search-provider').value, 'linkedin');
   assert.match(document.querySelector('#ai-data-note').textContent, /API server/);
   const key = document.querySelector('[name="key-gemini"]'); key.value = 'PRIVATE_UI_KEY';
   document.querySelector('#ai-config-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
@@ -274,7 +312,7 @@ test('AI model form switches profiles, saves private keys without echoing them a
 
 test('local model controls are explicit, show progress and block other model workflows until finished', async t => {
   const { document, state, calls, poll } = await setup(t, 'models');
-  document.querySelector('[data-action="setup-local-model"]').click();
+  document.querySelector('#local-model-download-form').dispatchEvent(new document.defaultView.Event('submit', { bubbles: true, cancelable: true }));
   await settle(() => document.querySelector('#local-model-status').textContent.includes('Downloading local model'));
   assert.match(document.querySelector('#workflow-status').textContent, /does not use Codex/);
   assert.equal(calls.filter(call => call.path === '/api/ai/local/setup').length, 1);
@@ -283,6 +321,72 @@ test('local model controls are explicit, show progress and block other model wor
   await poll();
   assert.equal(document.querySelector('[data-action="ai-test"]').disabled, false);
   assert.match(document.querySelector('#local-model-status').textContent, /Local model ready/);
+});
+test('dedicated download form accepts another model without changing provider and lists it for explicit Use', async t => {
+  const ai = publicAI(updateAIConfig({}, { provider: 'gemini', searchProvider: 'searxng' }), credentialStore(null, {}));
+  const { document, state, network, calls, poll } = await setup(t, 'models', [], { ai });
+  document.querySelector('#download-model-name').value = 'qwen3:8b';
+  document.querySelector('#local-model-download-form').dispatchEvent(new document.defaultView.Event('submit', { bubbles: true, cancelable: true }));
+  await settle(() => state.modelDownloads.length === 1);
+  assert.deepEqual(calls.find(call => call.path === '/api/ai/local/setup').body, { model: 'qwen3:8b', expectedRevision: ai.revision });
+  assert.equal(state.ai.provider, 'gemini'); assert.equal(state.ai.profiles.ollama.model, 'qwen3:4b');
+  await settle(() => document.querySelector('#download-model-name').value === 'qwen3:8b' && document.querySelector('#local-model-download-form button').disabled);
+  network.localModels.push({ name: 'qwen3:8b', size: 5200000000, parameters: '8B' });
+  state.modelDownloads = [{ ...state.modelDownloads[0], status: 'completed', phase: 'Download complete.' }];
+  await poll();
+  await settle(() => !!document.querySelector('[data-action="use-installed-model"][data-model="qwen3:8b"]'));
+  assert.equal(calls.some(call => call.path === '/api/ai/local/select'), false);
+  document.querySelector('[data-action="use-installed-model"][data-model="qwen3:8b"]').click();
+  await settle(() => state.ai.provider === 'ollama' && state.ai.profiles.ollama.model === 'qwen3:8b');
+  assert.equal(state.ai.searchProvider, 'searxng'); assert.equal(calls.some(call => call.path === '/api/codex/scan'), false);
+});
+test('standalone help is readable without contacting model, search or provider APIs', async t => {
+  const { document, calls } = await setup(t, 'help');
+  assert.match(document.querySelector('h1').textContent, /Help & local setup/);
+  assert.match(document.querySelector('#main').textContent, /npm run doctor/); assert.match(document.querySelector('#main').textContent, /Download model/);
+  assert.ok(document.querySelector('a[href="/user-guide.md"][download]'));
+  assert.deepEqual(calls.map(call => call.path), ['/api/state']);
+});
+test('legacy failed report distinguishes the hosted search used then from the currently selected local engine', async t => {
+  const error = 'LinkedIn and company careers: Ollama web search: HTTP 429.\nIndeed: Ollama web search: HTTP 429.';
+  const run = { status: 'failed', error, createdAt: '2026-11-04T14:51:57.297Z' }, before = JSON.stringify(run);
+  const ai = publicAI(updateAIConfig({}, { searchProvider: 'searxng' }), credentialStore(null, {}));
+  const { document, state, calls } = await setup(t, 'automation', [], { ai, scans: [run] });
+  assert.equal(document.querySelector('#scan-result').textContent.match(/HTTP 429/g).length, 1);
+  assert.match(document.querySelector('#scan-result .search-attempt-notice').textContent, /Hosted Ollama web search.*Current search: Local SearXNG/);
+  assert.match(document.querySelector('#scan-result').textContent, /settings have changed/);
+  assert.equal(JSON.stringify(state.scans[0]), before); assert.equal(calls.some(call => call.method !== 'GET'), false);
+});
+test('local workflow preset selects loopback generation/search without a key, download or job request', async t => {
+  const { document, state, calls } = await setup(t, 'models');
+  document.querySelector('[data-action="use-local-search"]').click();
+  await settle(() => state.ai.searchProvider === 'searxng');
+  await settle(() => document.querySelector('#ai-search-provider').value === 'searxng');
+  assert.equal(state.ai.provider, 'ollama'); assert.equal(state.ai.searchBaseUrl, 'http://127.0.0.1:8888');
+  assert.equal(document.querySelector('#ai-search-url-field').hidden, false); assert.equal(document.querySelector('.ai-key-fields').hidden, true);
+  assert.deepEqual(calls.filter(call => call.method !== 'GET').map(call => call.path), ['/api/ai/config']);
+  document.querySelector('[data-action="setup-local-search"]').click();
+  await settle(() => state.modelDownloads.some(run => run.tool === 'searxng'));
+  await settle(() => document.querySelector('[data-action="use-local-search"]').disabled);
+  assert.match(document.querySelector('#workflow-status').textContent, /Local search setup in progress/);
+  assert.equal(document.querySelector('[data-action="scan-now"]'), null);
+  assert.equal(calls.some(call => call.path === '/api/codex/scan'), false);
+});
+test('free model shortcuts reveal in-app key fields and submit separate keys only on Save', async t => {
+  const { dom, document, calls, state } = await setup(t, 'models');
+  document.querySelector('[data-action="choose-ai-provider"][data-provider="openrouter"]').click();
+  assert.equal(document.querySelector('#ai-provider').value, 'openrouter'); assert.equal(document.querySelector('[name="model"]').value, 'openrouter/free');
+  assert.equal(document.querySelector('[data-ai-key="openrouter"]').hidden, false); assert.equal(document.querySelector('[name="baseUrl"]').readOnly, true);
+  assert.equal(calls.filter(call => call.method !== 'GET').length, 0);
+  const source = document.querySelector('#ai-search-provider'); source.value = 'tavily'; source.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  assert.equal(document.querySelector('[data-ai-key="tavily"]').hidden, false);
+  document.querySelector('[name="key-openrouter"]').value = 'PRIVATE_ROUTER_KEY'; document.querySelector('[name="key-tavily"]').value = 'PRIVATE_SEARCH_KEY';
+  document.querySelector('#ai-config-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+  await settle(() => state.ai.provider === 'openrouter');
+  const saved = calls.find(call => call.path === '/api/ai/config'); assert.deepEqual(saved.body.keys, { openrouter: 'PRIVATE_ROUTER_KEY', tavily: 'PRIVATE_SEARCH_KEY' });
+  assert.equal(saved.body.searchProvider, 'tavily'); assert.equal(saved.body.resume, undefined);
+  await settle(() => document.querySelector('[name="key-openrouter"]').value === '');
+  assert.doesNotMatch(document.body.textContent, /PRIVATE_(?:ROUTER|SEARCH)_KEY/);
 });
 
 test('an old AI settings form keeps its original revision and cannot revert a remotely updated model', async t => {
@@ -399,4 +503,20 @@ test('blocked source history shows limited coverage and unique warnings without 
   assert.equal(state.scans[0].warnings.length, 9);
   assert.equal(calls.filter(call => call.method !== 'GET').length, 0);
   assert.doesNotMatch(document.body.textContent, /SYNTHETIC_PRIVATE_KEY/);
+});
+
+test('historical Ollama 429 reports keep source coverage and one warning with local-search recovery guidance', async t => {
+  const warning = 'Ollama web search: usage/rate limit reached; change provider or retry later (HTTP 429).';
+  const run = { id: 'quota', status: 'completed', createdAt: new Date().toISOString(), completedAt: new Date().toISOString(), newJobIds: ['saved-job'], companiesResearched: 0, closedJobs: [], technologies: [], summary: `LinkedIn and company careers: 5 source-checked opportunities retained.\nIndeed: ${warning}`, warnings: [warning, `Indeed: ${warning}`, `Employer research: ${warning}`], sourceResults: [{ jobSite: 'linkedin', status: 'completed', jobCount: 5 }, { jobSite: 'indeed', status: 'failed', error: warning }] };
+  const before = JSON.stringify(run);
+  const { document, calls, state } = await setup(t, 'automation', [], { scans: [run] });
+  assert.equal(document.querySelectorAll('#scan-result .error-inline').length, 1);
+  assert.equal(document.querySelector('#scan-result').textContent.match(/HTTP 429/g).length, 1);
+  assert.match(document.querySelector('.source-coverage').textContent, /Indeed: Search incomplete/);
+  assert.match(document.querySelector('#scan-result').textContent, /5 source-checked/);
+  assert.match(document.querySelector('#workflow-status').textContent, /1 warning to review/);
+  assert.match(document.querySelector('.search-access-help').textContent, /runs on ollama.com/);
+  assert.match(document.querySelector('.search-access-help').textContent, /Save AI settings and Test live search/);
+  assert.match(document.querySelector('.search-access-help').textContent, /does not tell us when the limit resets/);
+  assert.equal(JSON.stringify(state.scans[0]), before); assert.equal(calls.filter(call => call.method !== 'GET').length, 0);
 });

@@ -1,8 +1,14 @@
 # JobOS
 
-A local, single-user job-search workspace. Built with Node.js 24, SQLite, and a lightweight browser interface. Records are stored on this computer. Choose Codex, Gemini, Kimi, local Ollama or an OpenAI-compatible server in **AI models**. Ranking and tailoring send CV/job text to that chosen model; Ollama uses the local server. Public search queries use preferences and company names, never CV text. See [AI-MODELS.md](AI-MODELS.md) for provider keys, local downloads and setup.
+The [separate FreeLLMAPI app](FREELLMAPI.md) has its own gateway, private state and Codex/Claude Code launch commands. It lives at `../freellmapi`, beside `JOB`. Open it as its own VS Code folder. Select **Configure FreeLLMAPI** inside JobOS to use the same gateway for app workflows.
 
-For generation without hosted AI quotas, download Qwen3 in **AI models**, then choose **Use local model + free search**. This uses local Ollama and public LinkedIn/web sources without an API key. Computer resources and website access still limit it. [LOCAL-SETUP.md](LOCAL-SETUP.md) includes automatic setup, restart/resume steps and a manual fallback.
+Optional [FreeLLMAPI gateway and coding launchers](FREELLMAPI.md) connect downloaded Ollama to JobOS, Codex CLI and Claude Code without replacing your normal sign-ins. Local generation is the default gateway route; cloud model selection and keys remain explicit. See the guide for tested compatibility limits.
+
+A local, single-user job-search workspace. Built with Node.js 24, SQLite, and a lightweight browser interface. Records are stored on this computer. New workspaces use local Ollama and key-free public search. In **AI models**, use downloaded Ollama with local SearXNG, or choose Groq, free OpenRouter models, Gemini, Kimi, Codex or a compatible server. Add and switch API keys in the app. Ranking and tailoring send CV/job text to that chosen model; Ollama uses the local server. Public search queries use preferences and company names, never CV text. See [LOCAL-AI-WORKFLOW.md](LOCAL-AI-WORKFLOW.md) for local setup, optional free APIs and recovery.
+
+**No coding assistant required:** use **Help & local setup** in the sidebar or keep [USER-GUIDE.md](USER-GUIDE.md). The app includes a dedicated model-download form and installed-model selector. Windows users can start with `START-JOBOS.cmd`; `npm run doctor` diagnoses local services, and `npm run model:download -- qwen3:4b` downloads through the running app without a coding-model account.
+
+For generation without hosted AI quotas, download Qwen3 in **AI models**, then choose **Use local model + public search**. This uses local Ollama and public LinkedIn/web sources without an API key. Computer resources and website access still limit it. [LOCAL-SETUP.md](LOCAL-SETUP.md) includes automatic setup, restart/resume steps and a manual fallback.
 
 The primary workflow is junior software job discovery → published HR contacts → a CV and email for each opportunity. See [JOBOS.md](JOBOS.md) for the product goal and usage guide. Applications opens in list view with a direct posting link and tailoring action in every row. Applications defaults to all saved offers; Daily opportunities defaults to the recent publication window. Both sort latest published first; missing source dates appear last. Recently detected and Best CV fit are optional sort orders.
 
@@ -10,7 +16,7 @@ The primary workflow is junior software job discovery → published HR contacts 
 
 1. Start the server and open the local URL below.
 2. Install and pair the Chrome extension using Settings, then capture real job offers with full descriptions.
-3. Open **AI models**, select a provider/model, supply its key if required, then **Save AI settings** and **Test saved model**. For local operation, use **Install / download local model** to install Ollama with Qwen3 4B. Fresh searches with alternative providers also need a configured live search service; check it separately with **Test live search**. On a quota error, use the linked quota page or explicitly configure another search service with its own key. **Reload saved settings** refreshes an outdated form.
+3. Open **AI models**, select a provider/model, supply its key if required, then **Save AI settings** and **Test saved model**. For local operation, use **Download model** to install Ollama with Qwen3 4B. Fresh searches with alternative providers also need a configured live search service; check it separately with **Test live search**. On a quota error, use the linked quota page or explicitly configure another search service with its own key. **Reload saved settings** refreshes an outdated form.
 4. Open **CV & AI ranking** and upload your PDF, DOCX, or TXT CV (up to 2 MB). Review the extracted text. If you chose Codex, sign in with `codex login` when needed.
 5. Select up to 10 jobs, optionally enable public recruiting-email research, then click **Send to [selected provider] & rank**.
 6. Read the ranked results, strengths, gaps, suggested next steps, and source-linked contact emails. Scores are fit estimates, not hiring probabilities. No email is sent and no job application is submitted.

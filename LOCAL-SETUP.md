@@ -1,5 +1,7 @@
 # Run JobOS with a downloaded local model
 
+**Current setup — 2026-11-04:** downloaded Qwen3 4B with **local SearXNG**, both on loopback. The local model and public-search probes passed; some upstream engines report incomplete coverage. Hosted Ollama search is no longer the selected source. Use [LOCAL-AI-WORKFLOW.md](LOCAL-AI-WORKFLOW.md) for the current in-app setup and optional free API alternatives. The dated checks below describe earlier configurations.
+
 Use **Ollama · local** for generation, rankings and CV/email drafts. The model runs on this computer and does not use Gemini or Codex requests. Local inference has no hosted AI request quota; speed, available RAM/VRAM, model context and app timeouts still apply. Finding new public offers needs internet. LinkedIn and search engines can block or limit access, independently of the local model.
 
 ## If public search is blocked — updated 2026-10-21
@@ -41,7 +43,7 @@ Open <http://127.0.0.1:4317/#models>. Keep the terminal running. If it reports t
 ## Install through the app
 
 1. Open **AI models**. The default local model is `qwen3:4b`; its model profile remains separate from hosted providers. To choose `qwen3:8b`, select Ollama, edit Model and save first. Larger models require more memory and download space.
-2. Click **Install / download local model**. JobOS downloads the official Windows portable runtime into ignored `data/ollama/`, verifies the release SHA-256 before extracting it, starts a hidden local server and downloads the chosen model. The portable server binds to `127.0.0.1:11434`, stores models in the project and disables Ollama cloud features. Keep JobOS running during setup.
+2. Click **Download model**. JobOS downloads the official Windows portable runtime into ignored `data/ollama/`, verifies the release SHA-256 before extracting it, starts a hidden local server and downloads the chosen model. The portable server binds to `127.0.0.1:11434`, stores models in the project and disables Ollama cloud features. Keep JobOS running during setup.
 3. If downloading is interrupted, click the same button again. Runtime segments are retained and resumed; the complete runtime must still pass its official checksum. Ollama also resumes model-layer downloads. A failed progress report never means the model is ready.
 4. After completion, click **Use local model + free search**. It selects **Ollama · local**, its saved model and **Public LinkedIn + web · no API key**. This action changes settings only; it does not download another model or start a job scan.
 5. Click **Test saved model**. A synthetic JSON prompt verifies local generation. Then click **Test live search** for a generic public LinkedIn listing probe. A successful listing probe does not test contact searches or guarantee future access.

@@ -15,8 +15,8 @@ const schema = { type: 'object', additionalProperties: false, required: ['ok'], 
 const configFor = (provider, extra = {}) => updateAIConfig({}, { provider, ...(provider === 'compatible' ? { model: 'synthetic-model' } : {}), ...extra });
 const keys = () => { const store = credentialStore(null, {}); store.save({ gemini: 'synthetic-gemini-key', kimi: 'synthetic-kimi-key', compatible: 'synthetic-compatible-key', brave: 'synthetic-search-key', ollamaSearch: 'synthetic-web-key' }); return store; };
 
-test('AI profiles preserve model choices, reject unsafe endpoints/models and keep Codex as the default', () => {
-  const credentials = keys(); assert.equal(publicAI({}, credentials).provider, 'codex');
+test('AI profiles preserve model choices, reject unsafe endpoints/models and default to local generation with public search', () => {
+  const credentials = keys(); assert.equal(publicAI({}, credentials).provider, 'ollama'); assert.equal(publicAI({}, credentials).searchProvider, 'linkedin'); assert.equal(publicAI({ provider: 'codex', searchProvider: 'none' }, credentials).provider, 'codex');
   let config = configFor('ollama', { model: 'qwen3:8b', contextTokens: 65536 });
   config = updateAIConfig(config, { provider: 'gemini' }); config = updateAIConfig(config, { provider: 'ollama' });
   assert.equal(config.profiles.ollama.model, 'qwen3:8b'); assert.equal(config.contextTokens, 65536);
@@ -80,7 +80,7 @@ test('local context checks reject oversized input before sending it rather than 
 });
 
 test('local ranking needs no web key, validates every job and uses CV data only in the model body', async () => {
-  const config = configFor('ollama'), calls = [], job = { id: 'one', title: 'Engineer', company: 'Acme', description: 'Python software. Recruitment: jobs@example.com', url: 'https://example.com/job/1' };
+  const config = configFor('ollama', { searchProvider: 'none' }), calls = [], job = { id: 'one', title: 'Engineer', company: 'Acme', description: 'Python software. Recruitment: jobs@example.com', url: 'https://example.com/job/1' };
   const backend = createAIBackend(config, credentialStore(null, {}), { fetcher: async (url, options) => {
     calls.push({ url, body: options?.body });
     if (url.endsWith('/api/tags')) return response({ models: [{ name: 'qwen3:4b' }] });

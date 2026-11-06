@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { performAutomatedScan } from '../lib/automation.js';
 import { verifyCompanies } from '../lib/companies.js';
 import { preferenceFingerprint } from '../lib/profile.js';
-import { uniqueSearchWarnings } from '../lib/search-warnings.js';
+import { uniqueSearchWarnings, searchSummary } from '../lib/search-warnings.js';
 const settings = { resume: 'Synthetic engineer with Python, SQL and React experience in real software projects.', resumeHash: 'test', searchDomains: 'AI engineering', searchLocation: 'Morocco and remote roles' };
 const job = { id: 'one', title: 'AI Engineer', company: 'Acme', description: 'Build machine learning services with Python, SQL, Docker and FastAPI.', stage: 'Saved', postedAt: '2 days ago', updatedAt: '2026-10-07T10:00:00Z', url: 'https://www.linkedin.com/jobs/view/12/' };
 
@@ -53,7 +53,11 @@ test('combined search reports failure when neither source could be searched', as
     search: async preferences => { calls.push(preferences.jobSite); throw new Error('Synthetic unavailable source'); },
     research: async () => { assert.fail('Do not research without discovery'); }, rank: async () => { assert.fail('Do not rank after discovery failed'); },
     saveJob: () => { assert.fail('Do not invent offers'); }, saveCompany: () => {}
-  }), /LinkedIn and company careers: Synthetic unavailable source[\s\S]*Indeed: Synthetic unavailable source/);
+  }), error => {
+    assert.equal(error.message.match(/Synthetic unavailable source/g).length, 1);
+    assert.deepEqual(error.sourceResults.map(source => source.jobSite), ['linkedin', 'indeed']);
+    assert.ok(error.sourceResults.every(source => source.status === 'failed')); return true;
+  });
   assert.deepEqual(calls, ['linkedin', 'indeed']);
 });
 test('manual scan saves new jobs, skips closed offers, researches companies and ranks against CV', async () => {
@@ -102,6 +106,27 @@ test('warning summaries collapse the same source failure while retaining distinc
   const warnings = ['Public web search blocked.', 'Employer research: Public web search blocked.', 'Public LinkedIn unreadable.', 'CV comparison: Model timed out.', 'CV comparison: Model timed out.'];
   assert.deepEqual(uniqueSearchWarnings(warnings), ['Public web search blocked.', 'Public LinkedIn unreadable.', 'CV comparison: Model timed out.']);
   assert.equal(warnings.length, 5);
+});
+test('shared quota failures appear once across discovery, Indeed and employer research', async () => {
+  const warning = 'Ollama web search: usage/rate limit reached; change provider or retry later (HTTP 429).';
+  let compared = 0;
+  const result = await performAutomatedScan({ settings, knownJobs: [],
+    search: async preferences => {
+      if (preferences.jobSite === 'indeed') throw new Error(warning);
+      return { summary: 'LinkedIn results retained.', jobs: [job], warnings: [warning] };
+    },
+    research: async () => { throw Object.assign(new Error(warning), { code: 'SEARCH_SOURCE_BLOCKED' }); },
+    rank: async ({ jobs }) => { compared += jobs.length; return { summary: 'Compared', rankings: [] }; },
+    saveJob: input => ({ job: input, created: true }), saveCompany: () => {}
+  });
+  assert.deepEqual(result.warnings, [warning]); assert.equal(compared, 1);
+  assert.deepEqual(result.newJobIds, [job.id]); assert.equal(result.companiesResearched, 0);
+  assert.equal(result.sourceResults.find(source => source.jobSite === 'indeed').status, 'failed');
+  assert.doesNotMatch(result.summary, /HTTP 429/);
+  const oldWarnings = [warning, `Indeed: ${warning}`, `Employer research: ${warning}`, 'Indeed: Different source HTTP 403'];
+  assert.deepEqual(uniqueSearchWarnings(oldWarnings), [warning, 'Indeed: Different source HTTP 403']);
+  assert.equal(searchSummary(`LinkedIn: useful results\nIndeed: ${warning}`, oldWarnings), 'LinkedIn: useful results');
+  assert.equal(oldWarnings.length, 4);
 });
 test('recruiting members and emails need literal public-source evidence', async () => {
   const result = await verifyCompanies({ companies: [{ name: 'Acme', industry: 'Software', website: 'https://example.com', sourceUrl: 'https://example.com/about', recruitmentTeam: [{ name: 'Alex Recruiter', role: 'Talent acquisition manager', profileUrl: 'https://example.com/team/alex', sourceUrl: 'https://example.com/team' }, { name: 'Invented Person', role: 'Recruiter', sourceUrl: 'https://example.com/team' }], contacts: [{ email: 'careers@example.com', sourceUrl: 'https://example.com/careers' }, { email: 'guessed@example.com', sourceUrl: 'https://example.com/careers' }] }] }, ['Acme'], async url => ({ text: 'Acme team: Alex Recruiter, Talent acquisition manager. Contact careers@example.com.', url }));

@@ -5,6 +5,13 @@
   "scripts": {
     "start": "node --env-file-if-exists=.env server.js",
     "dev": "node --watch --env-file-if-exists=.env server.js",
+    "doctor": "node scripts/doctor.js",
+    "model:download": "node scripts/download-model.js",
+    "gateway:setup": "node --env-file-if-exists=.env scripts/setup-gateway.js",
+    "gateway:start": "node --env-file-if-exists=.env scripts/start-gateway.js",
+    "gateway:models": "node --env-file-if-exists=.env scripts/gateway-models.js",
+    "gateway:codex": "node --env-file-if-exists=.env scripts/gateway-code.js codex",
+    "gateway:claude": "node --env-file-if-exists=.env scripts/gateway-code.js claude",
     "test": "node --test test/*.test.js",
     "check": "node scripts/check.js"
   },

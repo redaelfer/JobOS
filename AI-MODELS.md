@@ -1,18 +1,24 @@
 # Choose an AI model in JobOS
 
+**FreeLLMAPI · local gateway** is also available in AI models. Setup stores its client key privately, pins downloaded Ollama by default, and keeps live search independent. See [FREELLMAPI.md](FREELLMAPI.md) for JobOS switching, provider keys and the separate Codex/Claude Code launchers. Cloud gateway routes retain upstream quotas and send inputs to the selected service; coding compatibility with the small local model is experimental.
+
 Open **AI models** in the sidebar, or visit <http://127.0.0.1:4317/#models>. The saved provider is used for the next requested search, employer research, CV ranking and CV/email draft. Switching providers does not launch a search, rewrite old results or fall back to Codex. Historical workflows retain their provider/model metadata.
+
+New workspaces default to **Ollama + public LinkedIn/web tools**, without hosted AI keys. Existing explicit choices are retained. For downloaded generation and self-hosted search, use **Install / start local search** followed by **Use local model + local search**. See [LOCAL-AI-WORKFLOW.md](LOCAL-AI-WORKFLOW.md) for the complete local workflow, optional Groq/OpenRouter generation, Tavily search, in-app key entry and terminal recovery.
 
 | Provider | CV ranking and tailoring | Finding current jobs and contacts |
 | --- | --- | --- |
 | Codex CLI | Existing CLI sign-in; optional model override | Built-in Codex web search |
 | Google Gemini API | Gemini API key and model | Choose Gemini + Google Search; uses the same Gemini key |
 | Ollama local | Downloaded model on this computer; no inference API key or hosted AI quota | Public LinkedIn + web needs no key; optional hosted search sources require their own keys |
+| Groq | In-app Groq key; account/model-specific free-tier access and quotas | Any selected public, local SearXNG or hosted search source |
+| OpenRouter free models | In-app OpenRouter key; `openrouter/free` or catalog `:free` model only | Any selected public, local SearXNG or hosted search source |
 | Kimi / Moonshot API | Moonshot API key and model | Choose public sources without a key, or a hosted search service with its key |
 | OpenAI-compatible API / LM Studio | Server address, model and API key if required | Choose public sources without a key, or a hosted search service with its key |
 
 Hosted services have separate billing, account access and quotas. A different provider avoids Codex account usage, but it does not bypass that provider's limits. Compatible servers must support chat completions and JSON responses; arbitrary APIs are not automatically interchangeable.
 
-For downloaded models, start with [LOCAL-SETUP.md](LOCAL-SETUP.md). **Use local model + free search** selects local Ollama and public LinkedIn/web sources. This configuration needs no API key and has no hosted inference quota. Computer resources, context/time budgets and website restrictions still apply. Local inference does not provide unlimited access to LinkedIn or contact-search websites.
+For downloaded models, start with [LOCAL-SETUP.md](LOCAL-SETUP.md). **Use local model + public search** selects local Ollama and public LinkedIn/web sources. This configuration needs no API key and has no hosted inference quota. Computer resources, context/time budgets and website restrictions still apply. Local inference does not provide unlimited access to LinkedIn or contact-search websites.
 
 ## Use Gemini or Kimi
 
@@ -63,7 +69,7 @@ The Search needs attention panel retains the previous failed attempt. Changing s
 
 ## Download and use a local model
 
-1. Open **AI models** and click **Install / download local model**. The default Ollama profile is `qwen3:4b`. To choose another model, select Ollama, enter its name and save first.
+1. Open **AI models** and click **Download model**. The default Ollama profile is `qwen3:4b`. To choose another model, select Ollama, enter its name and save first.
 2. Leave JobOS running while setup downloads. It can require several GB and shows download progress. The button reuses Ollama if it is already running; otherwise it downloads the official Windows portable runtime, checks the release's SHA-256 checksum, and starts it locally. The runtime and models use ignored `data/ollama/` storage for the portable installation.
 3. After completion, select **Ollama · local**, model `qwen3:4b`, server `http://127.0.0.1:11434`, and click **Save AI settings** and **Test saved model**.
 4. Choose **Public LinkedIn + web · no API key** for key-free discovery, or add a hosted search service's key if you explicitly choose one. The downloaded model itself has no web browser. With **None**, ranking and CV/email drafting remain usable locally. Public source blocks do not prevent ranking or tailoring captured jobs.

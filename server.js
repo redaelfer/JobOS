@@ -3,12 +3,13 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { resolve, extname, dirname, join } from 'node:path';
 import { openStore } from './lib/store.js';
+import { setupLocalSearch } from './lib/local-search.js';
 import { clean, validateJob, matchJob, jobUrl } from './lib/domain.js';
 import { extractEmailJobs, pollMailbox, mailboxConfigured } from './lib/email.js';
 import { extractResume } from './lib/resume.js';
 import { createAIBackend } from './lib/ai.js';
-import { credentialStore, publicAI, updateAIConfig } from './lib/ai-config.js';
-import { setupLocalModel } from './lib/local-models.js';
+import { credentialStore, publicAI, updateAIConfig, validateModel } from './lib/ai-config.js';
+import { setupLocalModel, listLocalModels } from './lib/local-models.js';
 import { searchPreferences, hydrateSavedJobs } from './lib/discovery.js';
 import { performAutomatedScan } from './lib/automation.js';
 import { buildOpportunities } from './lib/opportunities.js';
@@ -18,7 +19,7 @@ import { createHash } from 'node:crypto';
 import { scanSites } from './lib/job-sites.js';
 import { validateTailoringAnalysis, tailoringAnalysisVersion } from './lib/tailoring-analysis.js';
 const root = fileURLToPath(new URL('./public/', import.meta.url));
-export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = resolve('main.tex'), artifactRoot = resolve('data/applications'), latexCompiler, tailorer, analyzer, ranker, searcher, researcher, hydrator = hydrateSavedJobs, statusChecker, credentialsPath = dbPath === ':memory:' ? null : join(dirname(dbPath), 'ai-credentials.json'), aiFactory = createAIBackend, aiOptions = {}, localSetup = setupLocalModel, credentialEnv = process.env } = {}) {
+export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = resolve('main.tex'), artifactRoot = resolve('data/applications'), latexCompiler, tailorer, analyzer, ranker, searcher, researcher, hydrator = hydrateSavedJobs, statusChecker, credentialsPath = dbPath === ':memory:' ? null : join(dirname(dbPath), 'ai-credentials.json'), aiFactory = createAIBackend, aiOptions = {}, localSetup = setupLocalModel, localModels = listLocalModels, searchSetup = setupLocalSearch, credentialEnv = process.env } = {}) {
   const store = openStore(dbPath);
   const credentials = credentialStore(credentialsPath, credentialEnv);
   const aiSnapshot = () => publicAI(store.get('settings', 'main').ai, credentials);
@@ -101,6 +102,29 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
           return send(200, aiSnapshot());
         }
         if (path === '/api/ai/models' && req.method === 'GET') return send(200, { models: await backend().models() });
+        if (path === '/api/ai/local/models' && req.method === 'GET') return send(200, { models: await localModels() });
+        const downloadId = path.match(/^\/api\/ai\/local\/download\/([^/]+)$/)?.[1];
+        if (downloadId && req.method === 'GET') { const run = store.get('modelDownloads', downloadId); return send(run ? 200 : 404, run || { error: 'Download not found.' }); }
+        if (path === '/api/ai/local/select' && req.method === 'POST') {
+          if (activeRun) return send(409, { error: 'Wait for the current workflow or download before selecting a model.' });
+          const model = validateModel(body.model);
+          if ('expectedRevision' in body && body.expectedRevision !== aiSnapshot().revision) return send(409, { error: 'AI settings changed. Reload saved settings before selecting a model.' });
+          activeRun = true;
+          try {
+            const installed = await localModels();
+            if (!installed.some(item => item.name === model || item.name === model + ':latest')) throw new Error('Download this model before using it.');
+            const settings = store.get('settings', 'main');
+            store.put('settings', { ...settings, ai: updateAIConfig(settings.ai, { provider: 'ollama', model, baseUrl: 'http://127.0.0.1:11434' }) });
+            return send(200, aiSnapshot());
+          } finally { activeRun = false; }
+        }
+        if (path === '/api/ai/search/local/setup' && req.method === 'POST') {
+          if (activeRun) return send(409, { error: 'Wait for the current AI workflow or setup to finish.' });
+          activeRun = true;
+          let run = store.put('modelDownloads', { status: 'running', tool: 'searxng', model: 'SearXNG', phase: 'Preparing local web search', createdAt: new Date().toISOString() });
+          Promise.resolve().then(() => searchSetup(phase => { run = store.put('modelDownloads', { ...run, phase }); })).then(() => store.put('modelDownloads', { ...run, status: 'completed', phase: 'Local SearXNG is ready. Select Local model + local search, then Test live search.', completedAt: new Date().toISOString() })).catch(error => store.put('modelDownloads', { ...run, status: 'failed', error: /Start Docker Desktop/.test(error.message) ? 'Start Docker Desktop, then retry Install / start local search in AI models.' : 'Local search setup could not finish. Check Docker Desktop, port 8888 and LOCAL-SETUP.md.', completedAt: new Date().toISOString() })).finally(() => { activeRun = false; });
+          return send(202, { id: run.id, status: run.status });
+        }
         if (['/api/ai/test', '/api/ai/search-test'].includes(path) && req.method === 'POST') {
           if (activeRun) return send(409, { error: 'Wait for the current AI workflow before testing a model.' });
           if ('expectedRevision' in body && body.expectedRevision !== aiSnapshot().revision) return send(409, { error: 'AI settings changed. Reload saved settings in AI models before testing.' });
@@ -109,11 +133,14 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
         }
         if (path === '/api/ai/local/setup' && req.method === 'POST') {
           if (activeRun) return send(409, { error: 'An AI workflow or model download is already running.' });
+          if ('expectedRevision' in body && body.expectedRevision !== aiSnapshot().revision) return send(409, { error: 'AI settings changed. Reload saved settings before downloading.' });
           const profile = aiSnapshot().profiles.ollama;
-          if (profile.baseUrl !== 'http://127.0.0.1:11434') throw new Error('Portable setup uses http://127.0.0.1:11434. Set that local address first.');
+          const model = validateModel(body.model ?? profile.model);
+          if (/cloud/i.test(model)) throw new Error('Choose a downloaded local model, not a cloud model.');
+          if (body.model === undefined && profile.baseUrl !== 'http://127.0.0.1:11434') throw new Error('Portable setup uses http://127.0.0.1:11434. Set that local address first.');
           activeRun = true;
-          let run = store.put('modelDownloads', { status: 'running', phase: 'Preparing local Ollama', model: profile.model, createdAt: new Date().toISOString() });
-          Promise.resolve().then(() => localSetup(profile.model, phase => { run = store.put('modelDownloads', { ...run, phase }); })).then(() => store.put('modelDownloads', { ...run, status: 'completed', phase: 'Local model is ready. Select Ollama, save settings and test the connection.', completedAt: new Date().toISOString() })).catch(() => store.put('modelDownloads', { ...run, status: 'failed', error: 'Local setup could not finish. Check available disk space/network, install Ollama from its official site if needed, then retry.' })).finally(() => { activeRun = false; });
+          let run = store.put('modelDownloads', { status: 'running', phase: 'Preparing local Ollama', model, createdAt: new Date().toISOString() });
+          Promise.resolve().then(() => localSetup(model, phase => { run = store.put('modelDownloads', { ...run, phase }); })).then(() => store.put('modelDownloads', { ...run, status: 'completed', phase: 'Download complete. Refresh installed models, click Use this model, then Test saved model.', completedAt: new Date().toISOString() })).catch(() => store.put('modelDownloads', { ...run, status: 'failed', completedAt: new Date().toISOString(), error: 'Local setup could not finish. Check available disk space/network, install Ollama from its official site if needed, then retry.' })).finally(() => { activeRun = false; });
           return send(202, { id: run.id, status: run.status });
         }
         return send(404, { error: 'AI endpoint not found.' });
@@ -190,7 +217,7 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
           if (activeRun) return send(409, { error: 'An AI workflow is already running.' });
           activeRun = true;
           const resumeHash = createHash('sha256').update(settings.resume).digest('hex');
-          let run = store.put('scans', { provider: ai.provider, model: ai.model, providerLabel: ai.providerLabel, jobSite: selectedSite, status: 'running', phase: selectedSite === 'all' ? 'Starting LinkedIn, company careers and Indeed search' : selectedSite === 'indeed' ? 'Starting Indeed search workflow' : 'Starting manual search workflow', createdAt: new Date().toISOString() });
+          let run = store.put('scans', { searchProvider: ai.provider === 'codex' ? 'codex' : aiSnapshot().searchProvider, searchBaseUrl: aiSnapshot().searchBaseUrl, provider: ai.provider, model: ai.model, providerLabel: ai.providerLabel, jobSite: selectedSite, status: 'running', phase: selectedSite === 'all' ? 'Starting LinkedIn, company careers and Indeed search' : selectedSite === 'indeed' ? 'Starting Indeed search workflow' : 'Starting manual search workflow', createdAt: new Date().toISOString() });
           Promise.resolve().then(() => performAutomatedScan({
             settings: { ...settings, resumeHash, rankInputBudget: ai.inputBudget, rankBatchSize: ai.rankBatchSize }, searchSite: selectedSite, knownJobs: store.list('jobs'), ignoredUrls: dismissedUrls(), isIgnored: isDismissed, companies: store.list('companies'), rankings: store.list('rankings'), search: ai.search, research: ai.research, rank: ai.rank, hydrate: hydrator, saveJob: ingest,
             progress: phase => { run = store.put('scans', { ...run, phase }); },
@@ -204,7 +231,7 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
             if (result.report) rankingId = store.put('rankings', { ...result.report, provider: ai.provider, model: ai.model, providerLabel: ai.providerLabel, status: 'completed', createdAt: run.createdAt, completedAt: new Date().toISOString(), jobIds: result.rankedJobs.map(j => j.id), jobUpdatedAt: Object.fromEntries(result.rankedJobs.map(j => [j.id, j.updatedAt])), resumeHash, preferencesHash: result.preferencesHash }).id;
             const { report, rankedJobs, ...summary } = result;
             store.put('scans', { ...run, ...summary, rankingId, status: 'completed', completedAt: new Date().toISOString() });
-          }).catch(error => store.put('scans', { ...run, status: 'failed', error: clean(error.message, 500) })).finally(() => { activeRun = false; });
+          }).catch(error => store.put('scans', { ...run, status: 'failed', completedAt: new Date().toISOString(), ...(error.sourceResults ? { sourceResults: error.sourceResults } : {}), error: clean(error.message, 500) })).finally(() => { activeRun = false; });
           return send(202, { id: run.id, status: run.status });
         }
         const scanId = path.match(/^\/api\/codex\/scan\/([^/]+)$/)?.[1];
@@ -312,10 +339,10 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
       if (path === '/api/check-mail' && req.method === 'POST') { try { return send(200, await checkMail()); } catch (e) { return send(400, { error: e.message }); } }
       if (path.startsWith('/api/')) return send(404, { error: 'Route not found.' });
       if (req.method !== 'GET') return send(405, { error: 'Method not allowed.' });
-      const files = { '/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css', '/domain.js': '../lib/domain.js', '/job-sites.js': '../lib/job-sites.js', '/search-warnings.js': '../lib/search-warnings.js', '/opportunities-view.js': 'opportunities-view.js', '/application-tools.js': 'application-tools.js', '/tailoring-view.js': 'tailoring-view.js', '/job-order.js': 'job-order.js', '/ai-settings-view.js': 'ai-settings-view.js' };
+      const files = { '/': 'index.html', '/help-view.js': 'help-view.js', '/user-guide.md': '../USER-GUIDE.md', '/freellmapi-guide.md': '../FREELLMAPI.md', '/app.js': 'app.js', '/style.css': 'style.css', '/domain.js': '../lib/domain.js', '/job-sites.js': '../lib/job-sites.js', '/search-warnings.js': '../lib/search-warnings.js', '/opportunities-view.js': 'opportunities-view.js', '/application-tools.js': 'application-tools.js', '/tailoring-view.js': 'tailoring-view.js', '/job-order.js': 'job-order.js', '/ai-settings-view.js': 'ai-settings-view.js' };
       if (!files[path]) return send(404, { error: 'File not found.' });
       const content = await readFile(resolve(root, files[path]));
-      res.writeHead(200, { 'Content-Type': ({ '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css' })[extname(files[path])], 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'" }); res.end(content);
+      res.writeHead(200, { 'Content-Type': ({ '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css', '.md': 'text/plain; charset=utf-8' })[extname(files[path])], 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'" }); res.end(content);
     } catch (e) { send(e.status || 400, { error: e.message || 'Request failed.' }); }
   });
   server.once('listening', () => {
