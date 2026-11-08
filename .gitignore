@@ -11,6 +11,9 @@ coverage/
 .env.*
 !.env.example
 
+# Machine-specific assistant permissions
+/.claude/settings.local.json
+
 # Private master CV, backups and local LaTeX compilation artifacts
 /main.tex
 /.main.tex*

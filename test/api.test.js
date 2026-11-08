@@ -71,8 +71,9 @@ test('deleted-posting memory survives an application restart', async t => {
 });
 
 test('rediscovered closed offers keep their record, notes and stage and are never counted as new', async t => {
+  const requested = [];
   const role = { title: 'Junior Software Engineer', company: 'Acme', url: 'https://www.linkedin.com/jobs/view/70003/', description: 'Build software services using Python and SQL.', source: 'Codex LinkedIn search', postedAt: '1 day ago' };
-  const { request } = await setup(t, { statusChecker: async () => ({ ready: true }), searcher: async () => ({ summary: 'Same posting', jobs: [{ ...role, url: 'https://ma.linkedin.com/jobs/view/engineer-70003/?trackingId=two' }] }), researcher: async () => { throw new Error('Closed offers must not trigger employer research'); }, ranker: async () => { throw new Error('Closed offers must not be ranked'); } });
+  const { request } = await setup(t, { statusChecker: async () => ({ ready: true }), searcher: async preferences => { requested.push(preferences); return { summary: 'Same posting', jobs: [{ ...role, url: 'https://ma.linkedin.com/jobs/view/engineer-70003/?trackingId=two' }] }; }, researcher: async () => { throw new Error('Closed offers must not trigger employer research'); }, ranker: async () => { throw new Error('Closed offers must not be ranked'); } });
   await request('/api/settings', 'PUT', { searchDomains: 'Software engineering', resume: 'Synthetic software engineer with Python and SQL development skills.' });
   const saved = (await request('/api/jobs', 'POST', role)).body.job;
   await request(`/api/jobs/${saved.id}`, 'PATCH', { stage: 'Closed', notes: 'Not interested; keep closed.' });
@@ -82,6 +83,12 @@ test('rediscovered closed offers keep their record, notes and stage and are neve
   await request('/api/codex/scan', 'POST', {}, headers);
   const state = (await request('/api/state')).body;
   assert.equal(state.scans[0].status, 'completed'); assert.equal(state.scans[0].newJobIds.length, 0); assert.deepEqual(state.scans[0].warnings, []);
+  assert.ok(requested.length === 2 && requested.every(p => p.excludedUrls.includes(role.url) && !p.knownUrls.includes(role.url)));
+  assert.deepEqual(state.scans[0].sourceResults.map(r => r.jobCount), [0, 0]);
+  assert.deepEqual(state.scans[0].savedJobIds, []); assert.deepEqual(state.scans[0].technologies, []);
+  assert.equal(state.alerts.length, 0); assert.equal(state.opportunities.counts.today, 0);
+  assert.equal((await request('/api/opportunities')).body.items.length, 0);
+  assert.equal(duplicate.body.skipped, true); assert.equal(duplicate.body.job.description, saved.description);
   assert.equal(state.jobs.length, 1); assert.equal(state.jobs[0].id, saved.id); assert.equal(state.jobs[0].stage, 'Closed'); assert.equal(state.jobs[0].notes, 'Not interested; keep closed.');
 });
 
@@ -103,8 +110,38 @@ test('one-click stage patch preserves notes and a pending search cannot reopen o
   assert.equal(state.scans[0].status, 'completed'); assert.deepEqual(state.scans[0].newJobIds, []); assert.deepEqual(state.scans[0].warnings, []);
   assert.equal(state.jobs.length, 1); assert.equal(state.jobs[0].id, saved.id);
   assert.equal(state.jobs[0].stage, 'Closed'); assert.equal(state.jobs[0].notes, role.notes);
+  assert.deepEqual(state.scans[0].savedJobIds, []); assert.deepEqual(state.scans[0].technologies, []);
+  assert.deepEqual(state.scans[0].sourceResults.map(r => r.jobCount), [0, 0]);
   const reopened = await request(`/api/jobs/${saved.id}`, 'PATCH', { stage: 'Saved' });
   assert.equal(reopened.body.stage, 'Saved'); assert.equal(reopened.body.notes, role.notes);
+  assert.equal((await request('/api/opportunities')).body.items[0].jobId, saved.id);
+});
+
+test('after restart a closed Indeed posting stays excluded from search, but a separate same-title posting can be saved', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'jobos-closed-search-')), dbPath = join(dir, 'test.sqlite');
+  const closed = { title: 'Junior Engineer', company: 'Acme', url: 'https://ma.indeed.com/viewjob?jk=1234567890abcdef' };
+  const other = { ...closed, url: 'https://ma.indeed.com/viewjob?jk=1234567890abcdee' };
+  try {
+    await t.test('close offer', async child => {
+      const { request } = await setup(child, { dbPath });
+      const saved = (await request('/api/jobs', 'POST', closed)).body.job;
+      await request('/api/jobs/' + saved.id, 'PATCH', { stage: 'Closed', notes: 'Not interested' });
+    });
+    await t.test('start a fresh server and search', async child => {
+      const { request } = await setup(child, { dbPath, statusChecker: async () => ({ ready: true }),
+        searcher: async p => {
+          assert.ok(p.excludedUrls.includes('https://www.indeed.com/viewjob?jk=1234567890abcdef'));
+          return { summary: 'Two records', jobs: [{ ...closed, url: 'https://ma.indeed.com/jobs?vjk=1234567890abcdef' }, other] };
+        } });
+      const headers = { 'X-JobOS-Token': (await request('/api/state')).body.settings.token };
+      const run = (await request('/api/codex/search', 'POST', { domains: 'Engineering', jobSite: 'indeed' }, headers)).body;
+      const search = (await request('/api/codex/search/' + run.id, 'GET', undefined, headers)).body;
+      assert.deepEqual(search.jobs, [other]);
+      assert.equal((await request('/api/codex/search/' + run.id + '/save', 'POST', { index: 0 }, headers)).status, 201);
+      const { jobs } = (await request('/api/state')).body;
+      assert.equal(jobs.length, 2); assert.equal(jobs.find(j => j.stage === 'Closed').notes, 'Not interested');
+    });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('deleting an offer during a pending scan prevents late results from recreating or ranking it', async t => {

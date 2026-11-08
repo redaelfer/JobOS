@@ -16,7 +16,7 @@ export function offerLink(job) {
 }
 export function closeOpportunityButton(job) {
   if (job.stage === 'Closed') return '';
-  return `<button type="button" class="text-button close-opportunity" data-action="close-job" data-id="${esc(job.id)}" aria-label="Close opportunity: ${esc(job.title)}" title="Not interested, outside my field, or not eligible. Keeps this offer and its notes.">Close</button>`;
+  return `<button type="button" class="text-button close-opportunity" data-action="close-job" data-id="${esc(job.id)}" aria-label="Close opportunity: ${esc(job.title)}" title="Skip this posting in future searches. Other openings at this company can still appear.">Close</button>`;
 }
 export function applicationList(jobs, opportunities, stages) {
   return `<div class="panel application-list"><table class="list-table"><thead><tr><th>OPPORTUNITY</th><th>COMPANY</th><th>OFFER</th><th>LOCATION</th><th>CONTACT</th><th>STAGE</th><th>POSTED</th></tr></thead><tbody>${jobs.map(job => `<tr><td><button class="btn" data-action="edit-job" data-id="${esc(job.id)}">${esc(job.title)}</button><button class="text-button" data-action="prepare-job" data-id="${esc(job.id)}">Tailor CV & email</button></td><td>${esc(job.company)}</td><td>${offerLink(job) || '<span class="help">No link saved</span>'}</td><td>${esc(job.location || '—')}</td><td>${applicationContacts(opportunities.find(item => item.jobId === job.id), true)}</td><td><select data-stage-job="${esc(job.id)}" aria-label="Stage for ${esc(job.title)}">${stages.map(stage => `<option ${stage === job.stage ? 'selected' : ''}>${esc(stage)}</option>`).join('')}</select>${closeOpportunityButton(job)}</td><td><span class="help">${esc(job.postedAt || 'Date unknown')}</span></td></tr>`).join('')}</tbody></table></div>`;

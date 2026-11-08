@@ -30,7 +30,15 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
   const postingId = url => createHash('sha256').update(jobUrl(url)).digest('hex');
   const dismissedUrls = () => store.list('dismissedJobs').map(record => record.url);
   const isDismissed = job => { const url = typeof job === 'string' ? job : job?.url; return !!url && (!!store.get('dismissedJobs', postingId(url)) || store.list('dismissedJobs').some(record => jobUrl(record.url) === jobUrl(url))); };
+  // Closing is reversible. Derive exclusions from the current stages, separate
+  // from permanent deletion records. Late provider results consult the same set.
+  let excludedCache;
+  function excludedPostings() {
+    return excludedCache ??= new Set([...dismissedUrls(), ...store.list('jobs').filter(j => j.stage === 'Closed').map(j => j.url)].filter(Boolean).map(jobUrl));
+  }
+  const isExcluded = job => job.stage === 'Closed' || (!!job.url && excludedPostings().has(jobUrl(job.url)));
   function updateAlert(job) {
+    if (job.stage === 'Closed') return;
     const existing = store.list('alerts').find(a => a.jobId === job.id);
     const match = matchJob(job, store.get('settings', 'main'));
     if (existing) store.put('alerts', { ...existing, title: job.title, company: job.company });
@@ -42,6 +50,7 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
     if (isDismissed(job)) return { job: null, created: false, skipped: true, reason: 'You previously deleted this posting. It will not be added again.' };
     const existing = job.url && store.list('jobs').find(j => j.url && jobUrl(j.url) === job.url);
     if (existing) {
+      if (existing.stage === 'Closed') return { job: existing, created: false, skipped: true, reason: 'You closed this posting. Reopen it in Applications to see it again.' };
       if (input.descriptionVerified || (['LinkedIn email', 'Codex LinkedIn search', 'Codex employer search', 'AI LinkedIn search', 'AI employer search'].includes(existing.source) && job.source === 'LinkedIn extension') || (['Codex LinkedIn search', 'Codex employer search', 'AI LinkedIn search', 'AI employer search', 'Codex Indeed search', 'AI Indeed search'].includes(existing.source) && ['Codex LinkedIn search', 'Codex employer search', 'AI LinkedIn search', 'AI employer search', 'Codex Indeed search', 'AI Indeed search'].includes(job.source) && !existing.description && job.description)) {
         const enriched = store.put('jobs', { ...existing, ...metadata, title: job.title, company: job.company, location: job.location || existing.location, description: job.description || existing.description, lastSeenAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
         updateAlert(enriched);
@@ -53,6 +62,7 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
     }
     const now = new Date().toISOString();
     const created = store.put('jobs', { ...job, createdAt: now, detectedAt: now, updatedAt: now, ...(input.verification ? { lastSeenAt: now } : {}) });
+    if (created.stage === 'Closed') excludedCache = undefined;
     updateAlert(created);
     return { job: created, created: true };
   }
@@ -84,8 +94,15 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
         try { body = JSON.parse(raw || '{}'); } catch { return send(400, { error: 'Invalid JSON.' }); }
         if (!body || Array.isArray(body) || typeof body !== 'object') return send(400, { error: 'JSON object required.' });
       }
-      if (path === '/api/state' && req.method === 'GET') return send(200, { ai: aiSnapshot(), modelDownloads: store.list('modelDownloads').slice(0, 1), jobs: store.list('jobs'), dismissedJobUrls: dismissedUrls(), contacts: store.list('contacts'), reminders: store.list('reminders'), alerts: store.list('alerts'), settings: store.get('settings', 'main'), mailbox, rankings: store.list('rankings').slice(0, 10), searches: store.list('searches').slice(0, 5), companies: store.list('companies'), scans: store.list('scans').slice(0, 10), opportunities: opportunities(), tailorings: store.list('tailorings').slice(0, 20).map(({ latex, email, changes, questions, analysis, ...run }) => run) });
-      if (path === '/api/opportunities' && req.method === 'GET') return send(200, opportunities());
+      if (path === '/api/state' && req.method === 'GET') {
+        const jobs = store.list('jobs');
+        const closedIds = new Set(jobs.filter(j => j.stage === 'Closed').map(j => j.id));
+        return send(200, { ai: aiSnapshot(), modelDownloads: store.list('modelDownloads').slice(0, 1), jobs, dismissedJobUrls: dismissedUrls(), contacts: store.list('contacts'), reminders: store.list('reminders'), alerts: store.list('alerts').filter(a => !closedIds.has(a.jobId)), settings: store.get('settings', 'main'), mailbox, rankings: store.list('rankings').slice(0, 10), searches: store.list('searches').slice(0, 5), companies: store.list('companies'), scans: store.list('scans').slice(0, 10), opportunities: opportunities(), tailorings: store.list('tailorings').slice(0, 20).map(({ latex, email, changes, questions, analysis, ...run }) => run) });
+      }
+      if (path === '/api/opportunities' && req.method === 'GET') {
+        const feed = opportunities();
+        return send(200, { ...feed, items: feed.items.filter(item => item.stage !== 'Closed') });
+      }
       if (path === '/api/resume' && req.method === 'POST') {
         const resume = await extractResume(body);
         store.put('settings', { ...store.get('settings', 'main'), resume: resume.text, resumeFilename: resume.filename });
@@ -219,7 +236,7 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
           const resumeHash = createHash('sha256').update(settings.resume).digest('hex');
           let run = store.put('scans', { searchProvider: ai.provider === 'codex' ? 'codex' : aiSnapshot().searchProvider, searchBaseUrl: aiSnapshot().searchBaseUrl, provider: ai.provider, model: ai.model, providerLabel: ai.providerLabel, jobSite: selectedSite, status: 'running', phase: selectedSite === 'all' ? 'Starting LinkedIn, company careers and Indeed search' : selectedSite === 'indeed' ? 'Starting Indeed search workflow' : 'Starting manual search workflow', createdAt: new Date().toISOString() });
           Promise.resolve().then(() => performAutomatedScan({
-            settings: { ...settings, resumeHash, rankInputBudget: ai.inputBudget, rankBatchSize: ai.rankBatchSize }, searchSite: selectedSite, knownJobs: store.list('jobs'), ignoredUrls: dismissedUrls(), isIgnored: isDismissed, companies: store.list('companies'), rankings: store.list('rankings'), search: ai.search, research: ai.research, rank: ai.rank, hydrate: hydrator, saveJob: ingest,
+            settings: { ...settings, resumeHash, rankInputBudget: ai.inputBudget, rankBatchSize: ai.rankBatchSize }, searchSite: selectedSite, knownJobs: store.list('jobs'), ignoredUrls: [...excludedPostings()], isIgnored: isExcluded, companies: store.list('companies'), rankings: store.list('rankings'), search: ai.search, research: ai.research, rank: ai.rank, hydrate: hydrator, saveJob: ingest,
             progress: phase => { run = store.put('scans', { ...run, phase }); },
             saveCompany: company => {
               store.put('companies', { ...company, id: createHash('sha256').update(company.name.toLowerCase()).digest('hex').slice(0, 24) });
@@ -238,13 +255,16 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
         if (scanId && req.method === 'GET') { const run = store.get('scans', scanId); return send(run ? 200 : 404, run || { error: 'Scan not found.' }); }
         if (path === '/api/codex/search' && req.method === 'POST') {
           if (activeRun) return send(409, { error: 'An AI workflow or model download is already running. Wait for it to finish.' });
-          const preferences = { ...searchPreferences(body), knownUrls: store.list('jobs').map(job => job.url).filter(Boolean), excludedUrls: dismissedUrls() };
+          const preferences = { ...searchPreferences(body), knownUrls: store.list('jobs').filter(job => !isExcluded(job)).map(job => job.url).filter(Boolean), excludedUrls: [...excludedPostings()] };
           const ai = backend(), ready = await ai.status('search'); if (!ready.ready) return send(503, { error: ready.message });
           if (activeRun) return send(409, { error: 'An AI workflow is already running.' });
           activeRun = true;
           store.put('settings', { ...store.get('settings', 'main'), searchDomains: preferences.domains.join(', '), searchLocation: preferences.location, searchLevel: preferences.level, searchExclude: preferences.exclude, searchMaxAgeDays: preferences.maxAgeDays, searchIncludeReview: preferences.includeReview });
           const run = store.put('searches', { provider: ai.provider, model: ai.model, providerLabel: ai.providerLabel, status: 'running', createdAt: new Date().toISOString(), preferences });
-          Promise.resolve().then(() => ai.search(preferences)).then(result => store.put('searches', { ...run, ...result, jobs: result.jobs.filter(job => !isDismissed(job)), status: 'completed', completedAt: new Date().toISOString() })).catch(error => store.put('searches', { ...run, status: 'failed', error: clean(error.message, 500) })).finally(() => { activeRun = false; });
+          Promise.resolve().then(() => ai.search(preferences)).then(result => {
+            const jobs = result.jobs.filter(job => !isExcluded(job));
+            return store.put('searches', { ...run, ...result, jobs, summary: jobs.length === result.jobs.length ? result.summary : `${jobs.length} opportunities retained after excluding closed or deleted postings.`, status: 'completed', completedAt: new Date().toISOString() });
+          }).catch(error => store.put('searches', { ...run, status: 'failed', error: clean(error.message, 500) })).finally(() => { activeRun = false; });
           return send(202, { id: run.id, status: run.status });
         }
         const searchMatch = path.match(/^\/api\/codex\/search\/([^/]+)(\/save)?$/);
@@ -293,6 +313,7 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
             store.remove(kind, id);
             if (kind === 'jobs') for (const k of ['reminders', 'alerts']) for (const r of store.list(k)) if (r.jobId === id) store.remove(k, r.id);
             store.db.exec('COMMIT');
+            if (kind === 'jobs') excludedCache = undefined;
           } catch (error) { store.db.exec('ROLLBACK'); throw error; }
           return send(200, { ok: true });
         }
@@ -306,7 +327,7 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
           else if (kind === 'alerts') fields = { read: body.read === true };
           else fields = contact({ ...existing, ...body });
           const saved = store.put(kind, { ...existing, ...fields, updatedAt: new Date().toISOString() });
-          if (kind === 'jobs') updateAlert(saved);
+          if (kind === 'jobs') { excludedCache = undefined; updateAlert(saved); }
           return send(200, saved);
         }
       }

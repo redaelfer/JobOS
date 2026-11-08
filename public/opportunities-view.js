@@ -6,7 +6,7 @@ const time = value => Number.isFinite(Date.parse(value)) ? new Date(value).toLoc
 export function filterOpportunities(feed, { range = 'all', mode = 'all', query = '', order = 'newest', posted = 'all' } = {}) {
   const weekStart = new Date(Date.parse(`${feed.today}T00:00:00Z`) - 6 * 86400000).toISOString().slice(0, 10);
   const publicationMatches = item => matchesPublication(item, posted, { maxAgeDays: feed.maxAgeDays || 30 }) && (posted !== 'older' || (!item.closed && item.stage === 'Saved'));
-  return orderJobs(feed.items.filter(item => publicationMatches(item) && (range === 'all' || (range === 'today' ? item.detectedDay === feed.today : item.detectedDay >= weekStart && item.detectedDay <= feed.today)) && (mode === 'all' || (mode === 'matches' ? item.recommended : !item.closed && item.rankingStatus !== 'current')) && `${item.title} ${item.company} ${item.location} ${item.technologies.join(' ')}`.toLowerCase().includes(query.toLowerCase())), order);
+  return orderJobs(feed.items.filter(item => item.stage !== 'Closed' && publicationMatches(item) && (range === 'all' || (range === 'today' ? item.detectedDay === feed.today : item.detectedDay >= weekStart && item.detectedDay <= feed.today)) && (mode === 'all' || (mode === 'matches' ? item.recommended : !item.closed && item.rankingStatus !== 'current')) && `${item.title} ${item.company} ${item.location} ${item.technologies.join(' ')}`.toLowerCase().includes(query.toLowerCase())), order);
 }
 export function opportunityCards(items) {
   if (!items.length) return `<div class="empty"><div class="empty-symbol">⌕</div><h2>No opportunities in this view yet</h2><p>Try all saved opportunities or a broader filter. New results appear here after a completed scan.</p></div>`;

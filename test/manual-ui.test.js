@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { JSDOM } from 'jsdom';
-import { stages, analyzeResume } from '../lib/domain.js';
+import { stages, analyzeResume, jobUrl } from '../lib/domain.js';
 import { dailyOpportunities, filterOpportunities, opportunityCards } from '../public/opportunities-view.js';
 import { applicationContacts, applicationList, closeOpportunityButton, searchNowButton } from '../public/application-tools.js';
 import { orderJobs, matchesPublication } from '../public/job-order.js';
@@ -22,7 +22,7 @@ async function setup(t, page = 'search', jobs = [], workflows = {}) {
   const state = { ai: publicAI({}, credentialStore(null, {})), modelDownloads: [], settings, jobs, rankings: [], searches: [], scans: [], tailorings: [], companies: [], contacts: [], reminders: [], alerts: [], mailbox: {}, opportunities: buildOpportunities({ settings, jobs }), ...workflows };
   const calls = [], intervals = [], network = { fail: false, searchTest: null, jobPatchError: '', localModels: [{ name: 'qwen3:4b', size: 2500000000, parameters: '4B' }] };
   const dom = new JSDOM(html, { url: 'http://jobos.test/#' + page, runScripts: 'outside-only' });
-  Object.assign(dom.window, { stages, analyzeResume, dailyOpportunities, filterOpportunities, opportunityCards, applicationContacts, applicationList, searchNowButton, orderJobs, matchesPublication, tailoringPage, tailoringResult, emailDraftUrl, aiModelsPage, updateAIForm, modelDownloadStatus, groundingSuggestions, aiQuotaHelp, setInterval: (callback, delay) => { intervals.push({ callback, delay }); return intervals.length; }, fetch: async (path, options = {}) => {
+  Object.assign(dom.window, { stages, analyzeResume, jobUrl, dailyOpportunities, filterOpportunities, opportunityCards, applicationContacts, applicationList, searchNowButton, orderJobs, matchesPublication, tailoringPage, tailoringResult, emailDraftUrl, aiModelsPage, updateAIForm, modelDownloadStatus, groundingSuggestions, aiQuotaHelp, setInterval: (callback, delay) => { intervals.push({ callback, delay }); return intervals.length; }, fetch: async (path, options = {}) => {
     const body = options.body ? JSON.parse(options.body) : undefined;
     calls.push({ path, method: options.method || 'GET', body });
     if (path === '/api/state' && network.fail) throw new Error('Synthetic connection loss');

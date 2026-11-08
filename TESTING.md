@@ -1,5 +1,41 @@
 # Verification
 
+## Four-domain coverage and posting-only closure (8 November 2026)
+
+Saved AI engineering, Machine learning, Data science and Full-stack development through the app settings API. The saved CV, Morocco/remote location, graduate/entry level, exclusions, 30-day window, broader-coverage setting and recommendation threshold were preserved. Search queries now rotate across domains before synonyms, include English/French role titles and do not require every title to contain a junior label. Corrected the domain matcher that previously treated Data science like Data engineering.
+
+All **267 isolated tests passed** (`test-results/four-domain-suite.log`); `npm run check` and `git diff --check` passed. New regressions cover bilingual domain matching, all four fields early in both LinkedIn and Indeed query plans, absence of CV content from queries, and a second posting from the same employer with the same title after the first was closed. The new posting remains saved with a score below the recommendation threshold. Headless Edge against an in-memory fixture verified Daily exclusion, Applications history, historical search results and the Close-button tooltip explaining that other company openings remain eligible.
+
+Started the updated local server after confirming no listener, no running workflows and mailbox polling disabled. Read-only live checks confirmed the four saved domains, 119 saved jobs and 85 Closed records, with zero Closed postings in the Daily API or matching alerts. Startup preserved the stored job, dismissal and settings records byte-for-byte. No live search, model generation or outreach was triggered. These checks verify selection and persistence, not exhaustive web coverage; source access, provider budgets and publication/eligibility uncertainty still apply.
+
+## Closed postings stay out of discovery (7 November 2026)
+
+The updated server was started on loopback after checking that port 4317 was free and mailbox polling was disabled. A read-only check of the user's existing workspace found zero Closed applications in the Daily API or the visible matching alerts.
+
+A closed application contributes its canonical posting URL to discovery exclusions. Isolated tests covered LinkedIn tracking aliases, closing while a search is pending, persisted Indeed closure after restarting the server, reopening the saved record, and a distinct posting ID with the same title and company. The suite passed all 264 tests and the syntax check passed. Headless Edge against an in-memory fixture verified that Daily opportunities hides the closed offer, Applications retains it, and a historical search displays only its remaining visible result. No live discovery or application-record migration was run.
+
+## Downloaded laptop fallback
+
+Installed official Qwen 3.5 4B using the existing Ollama runtime and created `freellm-coder-128k:latest` with a 131,072-token context. Ollama 0.40.3 reported 131,072 runtime tokens, 8,046,782,708 bytes of model memory and zero VRAM. The tiny native readiness request, including loading, took 9.85 seconds. This confirms allocation and CPU inference. Full-window retrieval accuracy and speed were not benchmarked.
+
+The actual Claude launcher in `--local` mode ran a controlled debugging task in a disposable directory. A regression test with two assertions initially failed. The client called Bash, Read, Read, Edit and Bash. The independent final test returned exit 0, the original test file was byte-for-byte intact, the client reported the local model and 131,072 context tokens, and six turns took 205 seconds. This is one bounded coding task.
+
+A temporary loopback server returned HTTP 429 while the production relay and real Ollama model handled a synthetic conversation containing a prior assistant tool call and its tool result. The result included a random marker known only from the tool result. The model recovered it after exactly one failed cloud attempt and one local inference. Tests also cover context overflow, local credentials, explicit pins, auth errors and an interrupted stream. A live listener check verified that requests without its session key returned 401 and dashboard endpoints returned 404. After enabling the backup, the normal Claude launcher completed a synthetic prompt on OpenRouter, confirming the cloud-first path. These probes supplied no CV, personal records or real project source. No jobs were searched.
+
+The cloud provider chain, its own quota handling and the JobOS model selection are separate. The laptop fallback is per Claude process. Relaunch with `--continue` in the same directory to take the new configuration into an existing conversation. A fully local inference session uses `--local`. The full standalone suite has 23 tests.
+
+## Claude debugging across provider quotas
+
+The existing `auto:coding-quality` profile now includes Google Gemini 3.5 Flash, Google Gemini 3.6 Flash, NVIDIA Muse Glimmer 30B and OpenRouter Dots3 Note Preview using its explicit `:free` ID. Its four members were read back from the gateway. Only this named chain was updated. The launcher still respects removed or disabled members on later launches. Requests in this chain can send the current conversation and tool results to any enabled member. Dashboard rankings and available quota determine which eligible member serves a turn.
+
+Request 179 recorded a Google 429 with one attempted Gemini 3.5 route. Both Google routes were enabled. There was no logged per-candidate exclusion reason for the unattempted model, and Google's message did not identify the quota window. The displayed reset estimate comes from the gateway's soonest local cooldown. A later synthetic call through the normal launcher succeeded on Gemini 3.6 (180).
+
+Two live Claude CLI exercises used disposable files. Muse Glimmer used Read, recovered the random evidence marker and correctly computed the expected and actual prices (181–182). Dots3's initial debugging run exhausted its turn budget when a fixture guard denied basic directory listings. Once the guard allowed safe directory orientation, Dots3 issued Bash, Read, Read, Edit and Bash. An independent run of the same two assertions failed before and passed after the implementation edit. The test file was identical (192–196). This live debugging run stayed on one provider.
+
+In the separate app, `node scripts/verify-context-handoff.mjs` starts the installed gateway on a temporary loopback port using an in-memory database, synthetic credentials and provider doubles. Provider A requests a tool. Its next streaming request fails with a forced 429 before output. The real gateway routes that request to B, which receives the identical translated message array, including the system instruction, original user ticket, assistant tool call ID and matching tool result. Exactly one response stream starts for the retried request. This test passed separately from the live debugging run. A provider failure after output starts can still require asking Claude to continue in the same session. Context limits, compaction, provider availability and model reasoning still apply.
+
+All 17 standalone tests and both project syntax checks passed.
+
 ## Quality-only Claude route (6 November 2026)
 
 The separate launcher now defaults to `auto:coding-quality`. The live named profile contains exactly Google Gemini 3.5 Flash and 3.6 Flash. Both report 1,048,576 catalog tokens and tools. Claude reports 131,072 context tokens. The launcher validates the selected routes and prints the working directory and route on interactive startup. The global gateway selection is still Default. JobOS can opt in through its own model field.

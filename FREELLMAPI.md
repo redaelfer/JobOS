@@ -34,6 +34,8 @@ For a different gateway model, save the FreeLLMAPI profile, click **List availab
 
 ## Use Codex or Claude Code independently
 
+The sibling app's `freellmapi/README.md` documents local setup in “Switch to the downloaded laptop model.” From your project, append `--local --continue` to the usual Claude launcher command to resume the current project’s conversation using downloaded Qwen 3.5 4B. New automatic Claude sessions have a laptop backup after cloud quota or server failures before output. We verified 131,072 runtime context tokens, a real local debugging task and a cloud-to-laptop handoff.
+
 From the **separate freellmapi folder**, choose one:
 
 ```powershell
@@ -50,9 +52,9 @@ node "C:\Users\ROG\Pictures\ensias\project\freellmapi\scripts\code.js" claude
 
 This launches a separate gateway-configured Claude session. A plain `claude` command is not globally redirected by these launchers. The absolute-path entry was live-tested from an independent temporary folder with spaces: automatic routing and a real file read passed.
 
-Claude defaults to `auto:coding-quality`. This named chain currently admits Google Gemini 3.5 Flash and 3.6 Flash with a configured key, tool support and a catalog context of at least 131,072 tokens. The gateway lists both at 1,048,576 tokens. Claude uses a 131,072-token window by default. The first audit that correctly found the planted Git bug ran on 3.5. The folder-scope test ran on 3.6. A model's dashboard score alone does not measure whether it followed a coding instruction correctly.
+The default `auto:coding-quality` route uses Gemini 3.5 Flash and 3.6 Flash on Google, Muse Glimmer 30B on NVIDIA, and the explicitly free Dots3 Note Preview on OpenRouter. New installations select only enabled routes with a configured key, tools and at least 131,072 context tokens. The live profile includes all four. The gateway ranks eligible routes, so the serving order can vary. The NVIDIA and Google routes use their accounts’ available allowances. OpenRouter uses the exact `:free` ID. Provider account settings govern any billing.
 
-The launcher creates the named chain from eligible models enabled in the dashboard. It respects a disabled member. On startup it checks the chain and stops if an unapproved model or automatic enrollment is enabled. When both Google routes exhaust their allowance, the gateway reports the failure. Both use the same provider, so provider-wide quota can affect them together. The older `claude-code` chain and Default remain available for deliberate use. Check the dashboard's request history to see which model served each turn.
+Claude Code owns the conversation. On a retryable error before output starts, FreeLLMAPI retries the same request on an eligible route with the current messages, tool calls and tool results. Stay in the same Claude session and leave the model flag out. If an answer breaks after streaming has started, type `continue` in that session and have Claude check the last edit or test result before repeating it. Large histories can still be compacted, and if every route is unavailable you must wait. A provider handoff can change the quality of the answer, so have Claude run the failing test after it edits the code. Included conversation and file/tool contents can go to any enabled provider in this chain.
 
 Start a **fresh** session from the repository you intend to work on. The interactive launcher prints the resolved Windows working folder and gateway route before Claude opens. For another repository under `project`, change to that sibling folder in PowerShell and run the same absolute launcher command. `Get-Location` shows your terminal's working directory immediately. For code review, ask for the Git commands and evidence that separate a working-tree change from a committed change.
 
@@ -64,7 +66,7 @@ List configured models with `npm.cmd run models`. JobOS does not need to be runn
 
 Claude's coding pool uses a 131,072-token context to leave more room for its tool definitions and conversation; explicit/local selections retain a conservative 32,768-token default. Output defaults to 4,096 tokens. The `CLAUDE_CODE_MAX_CONTEXT_TOKENS` and `CLAUDE_CODE_MAX_OUTPUT_TOKENS` environment variables can override these session values. Compaction stays enabled. The earlier "Request too large (max 32MB)" screenshot was reproduced with a 54 KB synthetic request: the gateway rejected context/token allowance, not HTTP byte size. Restart in a fresh session after the change; an existing session retains its old model selection and potentially degraded summary. If every route is too small, compact history or enable a route with enough allowance rather than raising the HTTP body limit.
 
-To use the two Google routes in JobOS, open **AI models → Configure FreeLLMAPI**, enter `auto:coding-quality` in **Model**, save and test. This sends model inputs to Google through your gateway. Select `local-ollama-jobos-coderlatest` for local inference.
+To use the same pool in JobOS, open **AI models → Configure FreeLLMAPI**, enter `auto:coding-quality` in **Model**, save and test. JobOS then forwards model input, including CV text when relevant, to the selected provider. The local Ollama option remains available separately.
 
 Gemini 3.5 Flash correctly identified the arithmetic bug and the branch divergence in a disposable Git repository. A fallback model in the older chain confused the uncommitted change with a commit. See [TESTING.md](TESTING.md) for the evidence.
 
