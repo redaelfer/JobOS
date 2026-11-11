@@ -55,7 +55,7 @@ Downloaded models process text; they do not contain current vacancies or provide
 
 For local SearXNG:
 
-1. Start Docker Desktop and wait for its engine to be running.
+1. Install Docker Desktop once if it is missing.
 2. In **AI models**, click **Install / start local search**.
 3. Click **Use local model + local search**.
 4. Click **Test live search**. It sends a generic public query, not the CV.
@@ -69,7 +69,9 @@ docker desktop start
 node scripts/setup-local-search.js
 ```
 
-The SearXNG service is bound to `127.0.0.1:8888`. Its container is named `jobos-searxng`. Setup reuses the owned container and its configuration; it does not delete an unrelated container with that name. Keep Docker running for this route.
+The SearXNG service is bound to `127.0.0.1:8888`. Its container is named `jobos-searxng`. Setup reuses the owned container and its configuration; it does not delete an unrelated container with that name.
+
+After this one-time setup, **Search now** automatically starts Docker Desktop on Windows and the installed JobOS search container if needed. Progress appears in the current search while the Docker engine starts, with a two-minute readiness limit. Keep JobOS open. If startup fails, open Docker Desktop to complete any initial setup or check its error, then retry. Search does not install Docker or download a missing container image; use **Install / start local search** for initial setup. A custom search port/address remains manually managed. The app does not start services when you merely open it, and does not enable scheduled searches. Docker may keep running after a search finishes.
 
 ## Understand the repeated HTTP 429 error
 

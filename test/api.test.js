@@ -494,6 +494,52 @@ test('automated scan saves employers, contacts and CV ranking, then deduplicates
   assert.equal(state.rankings.length, 2); assert.equal(state.opportunities.items[0].rankingStatus, 'current');
 });
 
+test('manual local scan waits for service startup, reports progress and rejects concurrent actions', async t => {
+  let release, starts = 0; const calls = [];
+  const { request } = await setup(t, {
+    statusChecker: async () => ({ ready: true }),
+    searchReady: async (base, progress) => { starts++; assert.equal(base, 'http://127.0.0.1:8888'); progress('Waiting for Docker Desktop to be ready'); await new Promise(resolve => { release = resolve; }); },
+    searcher: async p => { calls.push(p.jobSite); return { jobs: [], summary: 'No new fixtures' }; }
+  });
+  const headers = { 'X-JobOS-Token': (await request('/api/state')).body.settings.token };
+  await request('/api/settings', 'PUT', { resume: 'Synthetic software engineer with Python and SQL development skills.' });
+  await request('/api/ai/config', 'PUT', { searchProvider: 'searxng' }, headers);
+  await request('/api/state'); assert.equal(starts, 0);
+  assert.equal((await request('/api/codex/scan', 'POST', {})).status, 401); assert.equal(starts, 0);
+  assert.equal((await request('/api/codex/scan', 'POST', {}, headers)).status, 202);
+  let state = (await request('/api/state')).body;
+  assert.equal(state.scans[0].phase, 'Waiting for Docker Desktop to be ready'); assert.deepEqual(calls, []);
+  assert.equal((await request('/api/codex/scan', 'POST', {}, headers)).status, 409);
+  assert.equal((await request('/api/ai/config', 'PUT', { searchProvider: 'public' }, headers)).status, 409);
+  assert.equal((await request('/api/ai/search/local/setup', 'POST', {}, headers)).status, 409);
+  release();
+  for (let i = 0; i < 30; i++) { state = (await request('/api/state')).body; if (state.scans[0].status !== 'running') break; await new Promise(resolve => setImmediate(resolve)); }
+  assert.equal(state.scans[0].status, 'completed'); assert.equal(starts, 1); assert.deepEqual(calls, ['linkedin', 'indeed']);
+});
+
+test('failed local startup saves an actionable report, keeps records and releases the workflow lock', async t => {
+  const { request } = await setup(t, { statusChecker: async () => ({ ready: true }), searchReady: async () => { throw new Error('Docker Desktop could not start automatically. Open Docker Desktop, then retry Search now.'); }, searcher: async () => assert.fail('Search must wait for startup') });
+  const headers = { 'X-JobOS-Token': (await request('/api/state')).body.settings.token };
+  await request('/api/settings', 'PUT', { resume: 'Synthetic software engineer with Python and SQL development skills.' });
+  const saved = (await request('/api/jobs', 'POST', { title: 'Engineer', company: 'Acme', stage: 'Closed', notes: 'Keep my decision', url: 'https://example.com/job/1' })).body.job;
+  await request('/api/ai/config', 'PUT', { searchProvider: 'searxng' }, headers);
+  await request('/api/codex/scan', 'POST', {}, headers);
+  const state = (await request('/api/state')).body;
+  assert.equal(state.scans[0].status, 'failed'); assert.match(state.scans[0].error, /Docker Desktop could not start/); assert.deepEqual(state.jobs, [saved]);
+  assert.equal((await request('/api/ai/config', 'PUT', { searchProvider: 'public' }, headers)).status, 200);
+});
+
+test('public and Codex scans do not start local search services', async t => {
+  const { request } = await setup(t, { statusChecker: async () => ({ ready: true }), searchReady: async () => assert.fail('Unexpected Docker startup'), searcher: async () => ({ jobs: [], summary: 'Empty fixture' }) });
+  const headers = { 'X-JobOS-Token': (await request('/api/state')).body.settings.token };
+  await request('/api/settings', 'PUT', { resume: 'Synthetic software engineer with Python and SQL development skills.' });
+  for (const config of [{ provider: 'ollama', searchProvider: 'public' }, { provider: 'codex', searchProvider: 'searxng' }]) {
+    await request('/api/ai/config', 'PUT', config, headers);
+    await request('/api/codex/scan', 'POST', {}, headers);
+    assert.equal((await request('/api/state')).body.scans[0].status, 'completed');
+  }
+});
+
 test('default scan searches LinkedIn and Indeed in one guarded workflow and compares both without duplicates', async t => {
   const calls = []; let active = 0, release, hold = true;
   const { request } = await setup(t, {

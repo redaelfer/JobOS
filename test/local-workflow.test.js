@@ -7,7 +7,7 @@ import { aiConfig, updateAIConfig, credentialStore, publicAI, validateLocalSearc
 import { createModelClient } from '../lib/ai-client.js';
 import { createWebSearch } from '../lib/web-search.js';
 import { createSearxngSearch } from '../lib/searxng-search.js';
-import { setupLocalSearch } from '../lib/local-search.js';
+import { setupLocalSearch, ensureLocalSearch, ensureDockerDesktop } from '../lib/local-search.js';
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 const schema = { type: 'object', additionalProperties: false, required: ['ok'], properties: { ok: { type: 'boolean' } } };
@@ -93,5 +93,52 @@ test('local search installer preserves unowned containers and gives a safe Docke
   const calls = [];
   await assert.rejects(setupLocalSearch(() => {}, { command: async args => { calls.push(args); return args[0] === 'inspect' ? JSON.stringify([{ Config: { Labels: {} } }]) : 'ok'; } }), /not the expected private/);
   assert.equal(calls.some(args => ['start', 'run', 'pull', 'rm'].includes(args[0])), false);
-  await assert.rejects(setupLocalSearch(() => {}, { command: async () => { throw new Error('PRIVATE_CONFIG'); } }), error => /Start Docker Desktop/.test(error.message) && !/PRIVATE/.test(error.message));
+  await assert.rejects(setupLocalSearch(() => {}, { platform: 'linux', command: async () => { throw new Error('PRIVATE_CONFIG'); } }), error => /Start Docker Desktop/.test(error.message) && !/PRIVATE/.test(error.message));
+});
+
+test('Docker starts on demand and waits for the engine, but leaves a running engine alone', async () => {
+  const calls = [], phases = []; let checks = 0;
+  await ensureDockerDesktop(phase => phases.push(phase), { platform: 'win32', pause: async () => {}, command: async (args, options) => {
+    calls.push(args); assert.ok(options.timeoutMs > 0);
+    if (args[0] === 'version' && ++checks < 3) throw new Error('Stopped');
+    return 'ready';
+  } });
+  assert.deepEqual(calls.filter(args => args[0] === 'desktop'), [['desktop', 'start', '--detach']]);
+  assert.equal(checks, 3); assert.ok(phases.some(phase => /Waiting for Docker/.test(phase)));
+  await ensureDockerDesktop(() => {}, { command: async args => { assert.equal(args[0], 'version'); } });
+});
+
+test('Docker startup is bounded and gives actionable errors without exposing diagnostics', async () => {
+  let elapsed = 0;
+  await assert.rejects(ensureDockerDesktop(() => {}, { platform: 'win32', now: () => elapsed, startupTimeoutMs: 2000, pause: async ms => { elapsed += ms; }, command: async args => {
+    if (args[0] === 'version') throw new Error('PRIVATE_CONFIG');
+  } }), /did not become ready/);
+  assert.equal(elapsed, 2000);
+  await assert.rejects(ensureDockerDesktop(() => {}, { platform: 'win32', command: async () => { throw new Error('PRIVATE_CONFIG'); } }), error => /could not start automatically/.test(error.message) && !/PRIVATE_CONFIG/.test(error.message));
+});
+
+test('search readiness reuses a live service and never starts Docker for unavailable custom ports', async () => {
+  const command = async () => assert.fail('Docker must not run');
+  await ensureLocalSearch('http://127.0.0.1:8888', () => {}, { command, fetcher: async () => new Response('Ready') });
+  await ensureLocalSearch('http://localhost:9999', () => {}, { command, fetcher: async () => new Response('Ready') });
+  await assert.rejects(ensureLocalSearch('http://localhost:9999', () => {}, { command, fetcher: async () => { throw new Error('Offline'); } }), /configured local SearXNG address/);
+});
+
+test('search readiness restarts only the owned container and does not install or replace containers', async () => {
+  const root = join(tmpdir(), 'jobos-owned-search-fixture');
+  const container = { Config: { Labels: { 'io.jobos.local-search': '1' } }, HostConfig: { PortBindings: { '8080/tcp': [{ HostIp: '127.0.0.1', HostPort: '8888' }] } }, Mounts: [{ Source: join(root, 'config'), Destination: '/etc/searxng' }, { Source: join(root, 'cache'), Destination: '/var/cache/searxng' }], State: { Running: false } };
+  const calls = []; let started = false;
+  const fetcher = async () => { if (!started) throw new Error('Stopped'); return new Response('Ready'); };
+  const command = async args => {
+    calls.push(args);
+    if (args[0] === 'inspect') return JSON.stringify([container]);
+    if (args[0] === 'start') started = true;
+    return 'ok';
+  };
+  await ensureLocalSearch('http://127.0.0.1:8888', () => {}, { root, command, fetcher });
+  assert.deepEqual(calls.filter(args => args[0] === 'start'), [['start', 'jobos-searxng']]);
+  assert.equal(calls.some(args => ['pull', 'run', 'rm'].includes(args[0])), false);
+  started = false; container.Config.Labels = {};
+  await assert.rejects(ensureLocalSearch('http://127.0.0.1:8888', () => {}, { root, command, fetcher }), /not the expected private/);
+  await assert.rejects(ensureLocalSearch('http://127.0.0.1:8888', () => {}, { fetcher, command: async args => { assert.equal(['version', 'inspect'].includes(args[0]), true); if (args[0] === 'inspect') throw new Error('Missing'); } }), /not installed/);
 });

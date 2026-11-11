@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { resolve, extname, dirname, join } from 'node:path';
 import { openStore } from './lib/store.js';
-import { setupLocalSearch } from './lib/local-search.js';
+import { setupLocalSearch, ensureLocalSearch } from './lib/local-search.js';
 import { clean, validateJob, matchJob, jobUrl } from './lib/domain.js';
 import { extractEmailJobs, pollMailbox, mailboxConfigured } from './lib/email.js';
 import { extractResume } from './lib/resume.js';
@@ -19,11 +19,15 @@ import { createHash } from 'node:crypto';
 import { scanSites } from './lib/job-sites.js';
 import { validateTailoringAnalysis, tailoringAnalysisVersion } from './lib/tailoring-analysis.js';
 const root = fileURLToPath(new URL('./public/', import.meta.url));
-export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = resolve('main.tex'), artifactRoot = resolve('data/applications'), latexCompiler, tailorer, analyzer, ranker, searcher, researcher, hydrator = hydrateSavedJobs, statusChecker, credentialsPath = dbPath === ':memory:' ? null : join(dirname(dbPath), 'ai-credentials.json'), aiFactory = createAIBackend, aiOptions = {}, localSetup = setupLocalModel, localModels = listLocalModels, searchSetup = setupLocalSearch, credentialEnv = process.env } = {}) {
+export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = resolve('main.tex'), artifactRoot = resolve('data/applications'), latexCompiler, tailorer, analyzer, ranker, searcher, researcher, hydrator = hydrateSavedJobs, statusChecker, credentialsPath = dbPath === ':memory:' ? null : join(dirname(dbPath), 'ai-credentials.json'), aiFactory = createAIBackend, aiOptions = {}, localSetup = setupLocalModel, localModels = listLocalModels, searchSetup = setupLocalSearch, searchReady = ensureLocalSearch, credentialEnv = process.env } = {}) {
   const store = openStore(dbPath);
   const credentials = credentialStore(credentialsPath, credentialEnv);
   const aiSnapshot = () => publicAI(store.get('settings', 'main').ai, credentials);
   const backend = () => { const provider = aiFactory(store.get('settings', 'main').ai, credentials, aiOptions); return { ...provider, status: statusChecker || provider.status, tailor: tailorer || provider.tailor, analyzeTailoring: analyzer || provider.analyzeTailoring, rank: ranker || provider.rank, search: searcher || provider.search, research: researcher || provider.research }; };
+  const prepareSearch = async progress => {
+    const ai = aiSnapshot();
+    if (ai.provider !== 'codex' && ai.searchProvider === 'searxng') await searchReady(ai.searchBaseUrl, progress);
+  };
   const cv = cvWorkspace(cvPath, artifactRoot, latexCompiler);
   let polling = false, mailbox = { configured: mailboxConfigured(), lastCheck: null, error: null };
   let activeRun = false;
@@ -235,9 +239,10 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
           activeRun = true;
           const resumeHash = createHash('sha256').update(settings.resume).digest('hex');
           let run = store.put('scans', { searchProvider: ai.provider === 'codex' ? 'codex' : aiSnapshot().searchProvider, searchBaseUrl: aiSnapshot().searchBaseUrl, provider: ai.provider, model: ai.model, providerLabel: ai.providerLabel, jobSite: selectedSite, status: 'running', phase: selectedSite === 'all' ? 'Starting LinkedIn, company careers and Indeed search' : selectedSite === 'indeed' ? 'Starting Indeed search workflow' : 'Starting manual search workflow', createdAt: new Date().toISOString() });
-          Promise.resolve().then(() => performAutomatedScan({
+          const progress = phase => { run = store.put('scans', { ...run, phase }); };
+          Promise.resolve().then(() => prepareSearch(progress)).then(() => performAutomatedScan({
             settings: { ...settings, resumeHash, rankInputBudget: ai.inputBudget, rankBatchSize: ai.rankBatchSize }, searchSite: selectedSite, knownJobs: store.list('jobs'), ignoredUrls: [...excludedPostings()], isIgnored: isExcluded, companies: store.list('companies'), rankings: store.list('rankings'), search: ai.search, research: ai.research, rank: ai.rank, hydrate: hydrator, saveJob: ingest,
-            progress: phase => { run = store.put('scans', { ...run, phase }); },
+            progress,
             saveCompany: company => {
               store.put('companies', { ...company, id: createHash('sha256').update(company.name.toLowerCase()).digest('hex').slice(0, 24) });
               for (const member of company.recruitmentTeam || []) if (!store.list('contacts').some(c => c.name.toLowerCase() === member.name.toLowerCase() && c.company.toLowerCase() === company.name.toLowerCase())) store.put('contacts', { name: member.name, role: member.role, company: company.name, email: '', linkedin: member.profileUrl || '', notes: `${member.status}\nSource: ${member.sourceUrl}` });
@@ -260,8 +265,8 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
           if (activeRun) return send(409, { error: 'An AI workflow is already running.' });
           activeRun = true;
           store.put('settings', { ...store.get('settings', 'main'), searchDomains: preferences.domains.join(', '), searchLocation: preferences.location, searchLevel: preferences.level, searchExclude: preferences.exclude, searchMaxAgeDays: preferences.maxAgeDays, searchIncludeReview: preferences.includeReview });
-          const run = store.put('searches', { provider: ai.provider, model: ai.model, providerLabel: ai.providerLabel, status: 'running', createdAt: new Date().toISOString(), preferences });
-          Promise.resolve().then(() => ai.search(preferences)).then(result => {
+          let run = store.put('searches', { provider: ai.provider, model: ai.model, providerLabel: ai.providerLabel, status: 'running', createdAt: new Date().toISOString(), preferences });
+          Promise.resolve().then(() => prepareSearch(phase => { run = store.put('searches', { ...run, phase }); })).then(() => ai.search(preferences)).then(result => {
             const jobs = result.jobs.filter(job => !isExcluded(job));
             return store.put('searches', { ...run, ...result, jobs, summary: jobs.length === result.jobs.length ? result.summary : `${jobs.length} opportunities retained after excluding closed or deleted postings.`, status: 'completed', completedAt: new Date().toISOString() });
           }).catch(error => store.put('searches', { ...run, status: 'failed', error: clean(error.message, 500) })).finally(() => { activeRun = false; });
