@@ -5,12 +5,14 @@ import { searchQueries } from '../lib/web-search.js';
 import { discoveryPrompt } from '../lib/discovery.js';
 import { performAutomatedScan } from '../lib/automation.js';
 
-const domains = ['AI engineering', 'Machine learning', 'Data science', 'Full-stack development'];
+const domains = ['AI engineering', 'Machine learning', 'Data science', 'Full-stack development', 'Data engineering'];
 const preferences = { domains, location:'Morocco and remote roles', level:'Graduate / Entry level', includeEmployerSites:true };
 
 test('domain matching accepts English and French titles and role responsibilities', () => {
   for (const [domain, title, description = ''] of [
     ['Data science', 'Junior Data Scientist'], ['Data science', 'Scientifique des données'],
+    ['Data engineering', 'Analytics Engineer'], ['Data engineering', 'Ingénieure des données'],
+    ['Data engineering', 'Développeur ETL'], ['Data engineering', 'Software Engineer', 'Build data pipelines.'],
     ['Data science', 'Chargée d’études', 'Développement de modèles prédictifs'],
     ['AI engineering', 'Ingénieur IA'], ['AI engineering', 'Software Engineer', 'Build NLP services'],
     ['Machine learning', 'MLOps Engineer'], ['Machine learning', 'Ingénieur vision par ordinateur'],
@@ -21,16 +23,17 @@ test('domain matching accepts English and French titles and role responsibilitie
   assert.equal(matchesDomains({title:'Data Entry Clerk',description:'Enter invoices in a database.'},domains),false);
 });
 
-test('both sites search all four fields early, and cover junior and unqualified English/French variants', () => {
+test('both sites search all five fields early, including ordinary and junior titles in English and French', () => {
   for (const jobSite of ['linkedin','indeed']) {
     const queries = searchQueries({...preferences,jobSite,resume:'PRIVATE_FIXTURE_CV'});
-    const primary = ['AI Engineer','Machine Learning Engineer','Data Scientist','Full Stack Developer'];
-    assert.ok(primary.every((role,i)=>queries[i].startsWith(role+' ') && !queries[i].includes('junior')));
+    const primary = ['AI Engineer','Machine Learning Engineer','Data Scientist','Full Stack Developer','Data Engineer'];
+    assert.ok(primary.every((role,i)=>queries[i].startsWith('junior '+role+' ')));
+    assert.ok(primary.every((role,i)=>queries[primary.length+i].startsWith(role+' ')));
     for (const role of primary) {
       assert.ok(queries.some(q=>q.startsWith('junior '+role+' ')), role);
       assert.ok(queries.some(q=>q.startsWith(role+' remote ')), role);
     }
-    for(const alias of ['Ingénieur IA','Ingénieur machine learning','Science des données','Développeur full stack']) {
+    for(const alias of ['Ingénieur IA','Ingénieur machine learning','Science des données','Développeur full stack', 'Ingénieur données']) {
       assert.ok(queries.some(q=>q.startsWith(alias+' ')), alias);
       assert.ok(discoveryPrompt({...preferences,jobSite}).includes(alias));
     }

@@ -21,6 +21,8 @@ test('changed CV, domains or job details invalidate recommendations without dele
   }
 });
 test('fit threshold, closed jobs and application stages affect the actionable shortlist', () => {
+  const senior = feed({ settings: { ...settings, searchLevel: 'Graduate / Entry level' }, jobs: [{ ...job, title: 'Senior Data Engineer' }] });
+  assert.equal(senior.items.length, 1); assert.equal(senior.items[0].rankingStatus, 'current'); assert.equal(senior.items[0].recommended, false);
   assert.equal(feed({ settings: { ...settings, minimumFit: 90 } }).items[0].recommended, false);
   assert.equal(feed({ jobs: [{ ...job, stage: 'Applied' }] }).items[0].recommended, false);
   assert.equal(feed({ jobs: [{ ...job, verification: 'Posting may be closed' }] }).items[0].closed, true);

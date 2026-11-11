@@ -11,6 +11,19 @@ const now = Date.parse('2026-10-08T12:00:00Z');
 const preferences = searchPreferences({ domains: 'Software engineering, Data engineering', maxAgeDays: 30, includeReview: false });
 const posting = (index = 1, changes = {}) => ({ title: 'Junior Software Engineer', company: 'Acme', location: 'Morocco', url: `https://www.linkedin.com/jobs/view/${1000 + index}/`, description: 'Build software services with Python and PostgreSQL.', evidence: 'Acme seeks a junior software engineer in Morocco.', postedAt: '2 days ago', sourceCheckedAt: new Date(now).toISOString(), ...changes });
 
+test('graduate discovery skips explicit seniority while accepting neutral, junior and multi-level openings in both passes', () => {
+  const entry = { ...preferences, domains: ['Data engineering'], level: 'Graduate / Entry level', includeReview: true };
+  const titles = ['Data Engineer', 'Junior Data Engineer', 'Ingénieure données débutante', 'Data Engineer (Junior to Senior)', 'Sr. Data Engineer', 'Staff Data Engineer', 'Lead Data Engineer', 'Ingénieur data confirmé', 'Principal Data Engineer', 'Data Engineer'];
+  const desc = 'Build data pipelines alongside senior engineers and the technical lead.';
+  for (const coveragePass of ['recent', 'review']) {
+    const jobs = titles.map((title,i) => posting(i+1,{ title, postedAt:coveragePass === 'recent' ? '1 day ago' : '', verification:'Title and company found on public posting', description:desc + (i===9 ? ' Seniority level: Mid-Senior level' : '') }));
+    const result = selectSearchMatches({jobs,summary:'Fixtures'}, {...entry,coveragePass}, now);
+    assert.deepEqual(result.jobs.map(j=>j.url),jobs.slice(0,4).map(j=>j.url));
+    assert.equal(result.skipped.outsideLevel,6);
+    assert.equal(selectSearchMatches({jobs,summary:'Fixtures'}, {...entry,coveragePass,level:'Any experience level'}, now).jobs.length,10);
+  }
+});
+
 test('uncapped discovery accepts 25 unique jobs even when a legacy limit is supplied', () => {
   const prefs = searchPreferences({ domains: 'Software engineering', limit: 5 });
   const result = validateDiscovery({ summary: 'Source-backed jobs', jobs: Array.from({ length: 25 }, (_, i) => posting(i)) }, prefs);
@@ -22,7 +35,7 @@ test('uncapped discovery accepts 25 unique jobs even when a legacy limit is supp
 test('publication dates exclude four-month-old, undated and future roles without using discovery freshness', () => {
   const result = selectSearchMatches({ summary: 'Found', jobs: [posting(), posting(2, { postedAt: '4 months ago', detectedAt: new Date(now).toISOString() }), posting(3, { postedAt: '' }), posting(4, { postedAt: '2027-01-01' }), posting(5, { title: 'Sales Representative', description: 'Sell products and recruit customers.' })] }, preferences, now);
   assert.equal(result.jobs.length, 1);
-  assert.deepEqual(result.skipped, { old: 2, unknownDate: 1, outsideDomains: 1, closed: 0, unverifiedSource: 0 });
+  assert.deepEqual(result.skipped, { old: 2, unknownDate: 1, outsideDomains: 1, outsideLevel: 0, closed: 0, unverifiedSource: 0 });
   assert.equal(recentPosting(posting(6, { postedAt: '30 days ago' }), 30, now), true);
   assert.equal(recentPosting(posting(6, { postedAt: '31 days ago' }), 30, now), false);
   assert.equal(recentPosting(posting(6, { postedAt: 'il y a 7 jours' }), 7, now), true);

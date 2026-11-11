@@ -11,6 +11,7 @@ import { createAIBackend } from './lib/ai.js';
 import { credentialStore, publicAI, updateAIConfig, validateModel } from './lib/ai-config.js';
 import { setupLocalModel, listLocalModels } from './lib/local-models.js';
 import { searchPreferences, hydrateSavedJobs } from './lib/discovery.js';
+import { outsideEntryLevel } from './lib/search-policy.js';
 import { performAutomatedScan } from './lib/automation.js';
 import { buildOpportunities } from './lib/opportunities.js';
 import { automationPreferences, preferenceFingerprint } from './lib/profile.js';
@@ -42,9 +43,10 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
   }
   const isExcluded = job => job.stage === 'Closed' || (!!job.url && excludedPostings().has(jobUrl(job.url)));
   function updateAlert(job) {
-    if (job.stage === 'Closed') return;
+    const settings = store.get('settings', 'main');
+    if (job.stage === 'Closed' || outsideEntryLevel(job, settings.searchLevel)) return;
     const existing = store.list('alerts').find(a => a.jobId === job.id);
-    const match = matchJob(job, store.get('settings', 'main'));
+    const match = matchJob(job, settings);
     if (existing) store.put('alerts', { ...existing, title: job.title, company: job.company });
     else if (match.matched) store.put('alerts', { jobId: job.id, title: job.title, company: job.company, read: false, reasons: match.reasons, createdAt: new Date().toISOString() });
   }
@@ -100,8 +102,9 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
       }
       if (path === '/api/state' && req.method === 'GET') {
         const jobs = store.list('jobs');
-        const closedIds = new Set(jobs.filter(j => j.stage === 'Closed').map(j => j.id));
-        return send(200, { ai: aiSnapshot(), modelDownloads: store.list('modelDownloads').slice(0, 1), jobs, dismissedJobUrls: dismissedUrls(), contacts: store.list('contacts'), reminders: store.list('reminders'), alerts: store.list('alerts').filter(a => !closedIds.has(a.jobId)), settings: store.get('settings', 'main'), mailbox, rankings: store.list('rankings').slice(0, 10), searches: store.list('searches').slice(0, 5), companies: store.list('companies'), scans: store.list('scans').slice(0, 10), opportunities: opportunities(), tailorings: store.list('tailorings').slice(0, 20).map(({ latex, email, changes, questions, analysis, ...run }) => run) });
+        const level = store.get('settings', 'main').searchLevel;
+        const hiddenAlertIds = new Set(jobs.filter(j => j.stage === 'Closed' || outsideEntryLevel(j, level)).map(j => j.id));
+        return send(200, { ai: aiSnapshot(), modelDownloads: store.list('modelDownloads').slice(0, 1), jobs, dismissedJobUrls: dismissedUrls(), contacts: store.list('contacts'), reminders: store.list('reminders'), alerts: store.list('alerts').filter(a => !hiddenAlertIds.has(a.jobId)), settings: store.get('settings', 'main'), mailbox, rankings: store.list('rankings').slice(0, 10), searches: store.list('searches').slice(0, 5), companies: store.list('companies'), scans: store.list('scans').slice(0, 10), opportunities: opportunities(), tailorings: store.list('tailorings').slice(0, 20).map(({ latex, email, changes, questions, analysis, ...run }) => run) });
       }
       if (path === '/api/opportunities' && req.method === 'GET') {
         const feed = opportunities();

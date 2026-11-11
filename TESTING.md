@@ -1,5 +1,11 @@
 # Verification
 
+## Graduate role preferences and larger text (11 November 2026)
+
+The isolated suite passed all 275 tests and `npm run check` passed. Discovery tests cover the five fields on LinkedIn and Indeed, junior queries followed by ordinary titles, French data-engineering titles, and higher-level exclusions on both recent and older/undated passes. A junior role that mentions senior colleagues stays eligible. Higher-level saved jobs retain their application records and are excluded from strong recommendations under the graduate preference.
+
+Headless Edge verified that a single Close click changed only the selected posting to Closed, preserved its notes and kept another posting with the same company and title eligible. The Applications table and desktop navigation used 16px text at default browser settings, and the page fit a 390px viewport. After reloading the idle local server, the five saved fields, Graduate / Entry level, Morocco/remote location, 30-day window, unpaid/senior search exclusions and 158 applications were present. No new live job search was started for these checks.
+
 ## On-demand Docker startup and search connectivity (10 November 2026)
 
 Search now prepares the selected local SearXNG service inside the existing workflow guard. On Windows, an unavailable default local service starts Docker Desktop using its detached CLI command, waits up to two minutes for the engine, validates the owned container and starts it. An already reachable service is reused. Other search sources, custom addresses and reading app state do not start Docker. Missing installation, startup timeout and ownership conflicts return actionable failures without deleting data or changing providers. The explicit Install / start local search action also starts Docker when needed. [Docker Desktop start command](https://docs.docker.com/reference/cli/docker/desktop/start/).
