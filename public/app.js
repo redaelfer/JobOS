@@ -1,6 +1,6 @@
 import { stages, analyzeResume, jobUrl } from '/domain.js';
 import { dailyOpportunities, filterOpportunities, opportunityCards } from '/opportunities-view.js';
-import { applicationContacts, applicationList, closeOpportunityButton, searchNowButton } from '/application-tools.js';
+import { applicationContacts, applicationList, availabilityReview, closeOpportunityButton, searchNowButton } from '/application-tools.js';
 import { orderJobs, matchesPublication } from '/job-order.js';
 import { tailoringPage, tailoringResult, emailDraftUrl } from '/tailoring-view.js';
 import { aiModelsPage, updateAIForm, modelDownloadStatus, groundingSuggestions, aiQuotaHelp, searchAccessHelp, localModelCatalog } from '/ai-settings-view.js';
@@ -8,7 +8,7 @@ import { uniqueSearchWarnings, searchSummary, searchFailureText, searchRunSource
 import { helpPage } from '/help-view.js';
 const $ = s => document.querySelector(s);
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-let state, page = location.hash.slice(1) || 'daily', query = '', view = 'list', filter = 'All stages', jobOrder = 'newest', jobPosted = 'all', toastTimer;
+let state, page = location.hash.slice(1) || 'daily', query = '', view = 'list', filter = 'Saved', jobOrder = 'detected', jobPosted = 'all', toastTimer;
 const dailyFilters = { range: 'all', mode: 'all', query: '', order: 'newest', posted: 'recent' };
 let texMaster = null, texLoading = false, texDirty = false, tailorJobId = '', tailorResult = null;
 let installedModels = [], installedModelsLoaded = false, downloadModelChoice = '';
@@ -69,7 +69,7 @@ function updateWorkflowStatus() {
   if (page === 'models' && $('#local-search-status')) $('#local-search-status').innerHTML = state.modelDownloads?.[0]?.tool === 'searxng' ? modelDownloadStatus(state.modelDownloads[0]) : '';
 }
 const titles = { help: 'Help & local setup', models: 'AI models', tailor: 'CV & email tailoring', daily: 'Daily opportunities', pipeline: 'Applications', search: 'Job search', automation: 'Search history & employers', alerts: 'Discover & alerts', reminders: 'Follow-ups', contacts: 'People', studio: 'Career studio', codex: 'CV & AI ranking', settings: 'Settings & integrations' };
-async function api(path, method = 'GET', body) { const headers = body ? { 'Content-Type': 'application/json' } : {}; if (path.startsWith('codex/') || path.startsWith('ai/')) headers['X-JobOS-Token'] = state?.settings.token || ''; const res = await fetch(`/api/${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined, signal: path === 'state' ? AbortSignal.timeout(10000) : undefined }); const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Something went wrong.'); return data; }
+async function api(path, method = 'GET', body) { const headers = body ? { 'Content-Type': 'application/json' } : {}; if (path.startsWith('codex/') || path.startsWith('ai/') || path.startsWith('availability-check')) headers['X-JobOS-Token'] = state?.settings.token || ''; const res = await fetch(`/api/${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined, signal: path === 'state' ? AbortSignal.timeout(10000) : undefined }); const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Something went wrong.'); return data; }
 function toast(text) { $('#toast').textContent = text; $('#toast').classList.add('visible'); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').classList.remove('visible'), 5500); }
 async function refresh() { state = await api('state'); connectionLost = false; lastStatusCheck = new Date(); render(); }
 async function loadTex() {
@@ -118,6 +118,9 @@ function render() {
   document.querySelectorAll('[data-page]').forEach(el => el.classList.toggle('active', el.dataset.page === page));
   $('#main').innerHTML = ({ help: helpPage, models: () => aiModelsPage(state, { downloadModel: downloadModelChoice || state.ai.profiles.ollama.model, models: installedModels, loaded: installedModelsLoaded }), tailor: () => tailoringPage(state, { master: texMaster, selectedJobId: tailorJobId, result: tailorResult }), daily: () => dailyOpportunities(state, dailyFilters), pipeline, alerts, reminders, contacts, studio, settings, codex, search: searchPage, automation: automationPage })[page]();
   $('#main').insertAdjacentHTML('afterbegin', '<div id="workflow-status" role="status" aria-live="polite"></div>');
+  if (page === 'pipeline' || page === 'daily') {
+    $('.page-heading').insertAdjacentHTML('afterend', `<section class="panel" id="availability-review">${availabilityReview(state.jobs, state.availabilityCheck)}</section>`);
+  }
   updateWorkflowStatus();
   if (page === 'models') updateAIForm(document, state.ai);
   if (page === 'tailor' && texMaster === null) loadTex();
@@ -240,6 +243,31 @@ document.addEventListener('click', async e => {
       await refresh(); return toast('Downloaded model selected. Search settings kept. Test saved model before use.');
     }
     if (action === 'refresh-status') { await backgroundRefresh(false); return; }
+    if (action === 'check-availability') {
+      if (document.documentElement.dataset.jobosBrowserReview !== '1') {
+        $('#browser-review-help').hidden = false;
+        return;
+      }
+      el.disabled = true;
+      try {
+        const { report, ticket } = await api('availability-check', 'POST', { mode: 'browser' });
+        state.availabilityCheck = report;
+        if (ticket) {
+          const failed = async () => {
+            try {
+              await fetch('/api/availability-check/browser', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-JobOS-Review': ticket }, body: JSON.stringify({ action: 'pause' }) });
+              await refresh();
+              if ($('#browser-review-help')) $('#browser-review-help').hidden = false;
+            } catch (error) { toast(error.message); }
+          };
+          window.addEventListener('jobos-review-launch-failed', failed, { once: true });
+          setTimeout(() => window.removeEventListener('jobos-review-launch-failed', failed), 15000);
+          window.dispatchEvent(new CustomEvent('jobos-start-browser-review', { detail: ticket }));
+        }
+        render();
+      } finally { el.disabled = false; }
+      return;
+    }
     if (action === 'scan-now') { document.querySelectorAll('[data-action="scan-now"]').forEach(button => { button.disabled = true; }); await api('codex/scan', 'POST', { jobSite: 'all' }); await refresh(); return toast('Search started now. LinkedIn, company careers and Indeed use your saved preferences.'); }
     if (action === 'publication-view') { dailyFilters.posted = el.dataset.view; $('#daily-posted').value = dailyFilters.posted; return updateDailyCards(); }
     if (action === 'prepare-job') { tailorJobId = id; tailorResult = null; $('#modal').close(); location.hash = 'tailor'; if (page === 'tailor') render(); return; }
@@ -263,11 +291,22 @@ document.addEventListener('click', async e => {
     if (action === 'close') return $('#modal').close();
     if (action === 'add-job') return jobModal(null, el.dataset.stage);
     if (action === 'edit-job') return jobModal(id);
+    if (action === 'close-unavailable') {
+      const jobIds = [...document.querySelectorAll('#unavailable-offers [data-action="close-job"]')].map(button => button.dataset.id);
+      el.disabled = true;
+      try {
+        const result = await api('availability-check/close', 'POST', { reviewId: el.dataset.review, jobIds });
+        await refresh();
+        return toast(`${result.closed} unavailable ${result.closed === 1 ? 'offer' : 'offers'} closed.`);
+      } finally { el.disabled = false; }
+    }
     if (action === 'close-job') {
       if (state.jobs.find(job => job.id === id)?.stage === 'Closed') return;
       el.disabled = true;
       try {
-        await api(`jobs/${id}`, 'PATCH', { stage: 'Closed' });
+        const fields = { stage: 'Closed' };
+        if (el.dataset.expectedUrl) fields.expectedUrl = el.dataset.expectedUrl;
+        await api(`jobs/${id}`, 'PATCH', fields);
         if ($('#modal').open) $('#modal').close();
         await refresh(); return toast('Posting closed. Other openings at this company can still appear. History and notes kept.');
       } finally { el.disabled = false; }
@@ -369,10 +408,12 @@ async function backgroundRefresh(allowRender = true) {
       }
     }
     const changed = JSON.stringify(next) !== JSON.stringify(state);
+    const availabilityChanged = JSON.stringify(next.availabilityCheck) !== JSON.stringify(state.availabilityCheck);
     const rankingChanged = JSON.stringify(next.rankings) !== JSON.stringify(state.rankings);
     const searchesChanged = JSON.stringify(next.searches) !== JSON.stringify(state.searches);
     const scansChanged = JSON.stringify(next.scans) !== JSON.stringify(state.scans);
     state = next;
+    if (availabilityChanged && $('#availability-review')) $('#availability-review').innerHTML = availabilityReview(state.jobs, state.availabilityCheck);
     updateScanResult();
     await updateTailoring(next);
     if (searchesChanged) updateSearchResults();
@@ -390,12 +431,17 @@ async function backgroundRefresh(allowRender = true) {
 refresh().catch(error => { $('#main').innerHTML = empty('!', 'Could not load your workspace', esc(error.message)); });
 setInterval(backgroundRefresh, 30000);
 setInterval(async () => {
+  if (!polling && state?.availabilityCheck?.status === 'running' && !codexBusy()) return backgroundRefresh();
   if (polling || (!codexBusy() && !connectionLost)) return;
   polling = true;
   try {
     const next = await api('state');
     connectionLost = false; lastStatusCheck = new Date();
     const scanFinished = state.scans?.some(r => r.status === 'running') && !next.scans.some(r => r.status === 'running');
+    if (state.availabilityCheck?.status === 'running' || next.availabilityCheck?.status === 'running') {
+      state.availabilityCheck = next.availabilityCheck;
+      if ($('#availability-review')) $('#availability-review').innerHTML = availabilityReview(next.jobs, next.availabilityCheck);
+    }
     const modelFinished = state.modelDownloads?.some(r => r.status === 'running' && r.tool !== 'searxng') && next.modelDownloads?.some(r => r.status === 'completed' && r.tool !== 'searxng');
     state.rankings = next.rankings; state.searches = next.searches; state.scans = next.scans; state.tailorings = next.tailorings; state.modelDownloads = next.modelDownloads;
     if (['daily', 'pipeline', 'automation'].includes(page) && !$('#modal').open && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) { state = next; render(); }

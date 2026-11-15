@@ -14,13 +14,14 @@ import { searchPreferences, hydrateSavedJobs } from './lib/discovery.js';
 import { outsideEntryLevel } from './lib/search-policy.js';
 import { performAutomatedScan } from './lib/automation.js';
 import { buildOpportunities } from './lib/opportunities.js';
+import { availabilityReport, browserReviewStep, closeUnavailableJobs, startAvailabilityCheck, startBrowserReview } from './lib/availability.js';
 import { automationPreferences, preferenceFingerprint } from './lib/profile.js';
 import { cvWorkspace, validateTailoring, validateLatex, starterLatex, sourceHash, tailoringFailure, reportCvChanges } from './lib/tailoring.js';
 import { createHash } from 'node:crypto';
 import { scanSites } from './lib/job-sites.js';
 import { validateTailoringAnalysis, tailoringAnalysisVersion } from './lib/tailoring-analysis.js';
 const root = fileURLToPath(new URL('./public/', import.meta.url));
-export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = resolve('main.tex'), artifactRoot = resolve('data/applications'), latexCompiler, tailorer, analyzer, ranker, searcher, researcher, hydrator = hydrateSavedJobs, statusChecker, credentialsPath = dbPath === ':memory:' ? null : join(dirname(dbPath), 'ai-credentials.json'), aiFactory = createAIBackend, aiOptions = {}, localSetup = setupLocalModel, localModels = listLocalModels, searchSetup = setupLocalSearch, searchReady = ensureLocalSearch, credentialEnv = process.env } = {}) {
+export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = resolve('main.tex'), artifactRoot = resolve('data/applications'), latexCompiler, tailorer, analyzer, ranker, searcher, researcher, hydrator = hydrateSavedJobs, statusChecker, credentialsPath = dbPath === ':memory:' ? null : join(dirname(dbPath), 'ai-credentials.json'), aiFactory = createAIBackend, aiOptions = {}, localSetup = setupLocalModel, localModels = listLocalModels, searchSetup = setupLocalSearch, searchReady = ensureLocalSearch, availabilityFetcher, credentialEnv = process.env } = {}) {
   const store = openStore(dbPath);
   const credentials = credentialStore(credentialsPath, credentialEnv);
   const aiSnapshot = () => publicAI(store.get('settings', 'main').ai, credentials);
@@ -89,10 +90,10 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
       const local = !origin || allowedHosts.some(h => origin === `http://${h}`);
       const extension = /^chrome-extension:\/\/[a-p]{32}$/.test(origin || '');
       if (!local && !extension) return send(403, { error: 'Origin not allowed.' });
-      if (extension) { res.setHeader('Access-Control-Allow-Origin', origin); res.setHeader('Vary', 'Origin'); res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-JobOS-Token'); res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS'); }
+      if (extension) { res.setHeader('Access-Control-Allow-Origin', origin); res.setHeader('Vary', 'Origin'); res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-JobOS-Token, X-JobOS-Review'); res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS'); }
       const url = new URL(req.url, `http://${req.headers.host}`), path = url.pathname;
       if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
-      if (extension && path !== '/api/capture') return send(403, { error: 'Extension access is limited to capture.' });
+      if (extension && !['/api/capture', '/api/availability-check/browser'].includes(path)) return send(403, { error: 'Extension access is limited to capture and posting reviews.' });
       let body = {};
       if (['POST', 'PUT', 'PATCH'].includes(req.method)) {
         if (!req.headers['content-type']?.startsWith('application/json')) return send(415, { error: 'JSON required.' });
@@ -100,11 +101,23 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
         try { body = JSON.parse(raw || '{}'); } catch { return send(400, { error: 'Invalid JSON.' }); }
         if (!body || Array.isArray(body) || typeof body !== 'object') return send(400, { error: 'JSON object required.' });
       }
+      if (path === '/api/availability-check/browser' && req.method === 'POST') return send(200, browserReviewStep(store, req.headers['x-jobos-review'], body));
+      if (path === '/api/availability-check/close' && req.method === 'POST') {
+        if (req.headers['x-jobos-token'] !== store.get('settings', 'main').token) return send(401, { error: 'JobOS token required to close offers.' });
+        const result = closeUnavailableJobs(store, body);
+        if (result.closed) excludedCache = undefined;
+        return send(200, result);
+      }
+      if (path === '/api/availability-check' && req.method === 'POST') {
+        if (req.headers['x-jobos-token'] !== store.get('settings', 'main').token) return send(401, { error: 'JobOS token required to check saved offers.' });
+        if (body.mode === 'browser') return send(202, startBrowserReview(store));
+        return send(202, startAvailabilityCheck(store, availabilityFetcher));
+      }
       if (path === '/api/state' && req.method === 'GET') {
         const jobs = store.list('jobs');
         const level = store.get('settings', 'main').searchLevel;
         const hiddenAlertIds = new Set(jobs.filter(j => j.stage === 'Closed' || outsideEntryLevel(j, level)).map(j => j.id));
-        return send(200, { ai: aiSnapshot(), modelDownloads: store.list('modelDownloads').slice(0, 1), jobs, dismissedJobUrls: dismissedUrls(), contacts: store.list('contacts'), reminders: store.list('reminders'), alerts: store.list('alerts').filter(a => !hiddenAlertIds.has(a.jobId)), settings: store.get('settings', 'main'), mailbox, rankings: store.list('rankings').slice(0, 10), searches: store.list('searches').slice(0, 5), companies: store.list('companies'), scans: store.list('scans').slice(0, 10), opportunities: opportunities(), tailorings: store.list('tailorings').slice(0, 20).map(({ latex, email, changes, questions, analysis, ...run }) => run) });
+        return send(200, { availabilityCheck: availabilityReport(store), ai: aiSnapshot(), modelDownloads: store.list('modelDownloads').slice(0, 1), jobs, dismissedJobUrls: dismissedUrls(), contacts: store.list('contacts'), reminders: store.list('reminders'), alerts: store.list('alerts').filter(a => !hiddenAlertIds.has(a.jobId)), settings: store.get('settings', 'main'), mailbox, rankings: store.list('rankings').slice(0, 10), searches: store.list('searches').slice(0, 5), companies: store.list('companies'), scans: store.list('scans').slice(0, 10), opportunities: opportunities(), tailorings: store.list('tailorings').slice(0, 20).map(({ latex, email, changes, questions, analysis, ...run }) => run) });
       }
       if (path === '/api/opportunities' && req.method === 'GET') {
         const feed = opportunities();
@@ -328,6 +341,7 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
         if (req.method === 'PATCH') {
           let fields;
           if (kind === 'jobs') {
+            if ('expectedUrl' in body && body.expectedUrl !== existing.url) return send(409, { error: 'The posting link changed. Check this offer again before closing it.' });
             fields = validateJob({ ...existing, ...body });
             if (isDismissed(fields)) return send(409, { error: 'You previously deleted this posting. It will not be added again.' });
             if (fields.url && store.list('jobs').some(j => j.id !== id && j.url && jobUrl(j.url) === fields.url)) return send(409, { error: 'This job URL is already saved.' });
@@ -375,7 +389,7 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
     } catch (e) { send(e.status || 400, { error: e.message || 'Request failed.' }); }
   });
   server.once('listening', () => {
-    for (const kind of ['rankings', 'searches', 'scans', 'tailorings', 'modelDownloads']) for (const run of store.list(kind)) if (run.status === 'running') store.put(kind, { ...run, status: 'failed', error: 'The server restarted during this workflow. Please retry.' });
+    for (const kind of ['rankings', 'searches', 'scans', 'tailorings', 'modelDownloads', 'availabilityChecks']) for (const run of store.list(kind)) if (run.status === 'running') store.put(kind, { ...run, status: kind === 'availabilityChecks' && run.mode === 'browser' ? 'paused' : 'failed', error: 'The server restarted during this workflow. Please retry.' });
   });
   return { server, store, ingest, checkMail };
 }

@@ -91,6 +91,12 @@ Check **AI models → Live search source**. For the local setup it should be **L
 
 PDF compilation needs an installed/configured LaTeX compiler. If PDF compilation is unavailable, the separate `.tex` source and editable email can still be reviewed; see the draft's notes. Do not overwrite the master to fix a tailored draft. Never accept invented qualifications or contact details from a model.
 
+### Check whether saved offers still accept applications
+
+1. Use the Chrome profile where you open LinkedIn. At `chrome://extensions`, reload the **JobOS — LinkedIn capture** extension after updating it. For a first installation, choose **Developer mode → Load unpacked** and select the project's `extension` folder. Refresh the JobOS tab.
+2. In **Applications → Application availability**, click **Check saved offers in browser**. If Chrome requests access, review the listed posting sites and allow them. Keep the JobOS review tab open while it checks each posting.
+3. Open each link under **No longer accepting applications** to verify the notice. Click **Close** beside one offer, or use **Close all unavailable offers** below the list once the check finishes. The number on the button counts the postings it will close. Use **Open unverified offers** for pages the browser could not read.
+
 ## Optional API alternatives
 
 For a separate local gateway shared by JobOS, Codex CLI and Claude Code, see [FREELLMAPI.md](FREELLMAPI.md). It starts with downloaded Ollama; cloud providers remain explicit choices with their own quotas. The guide includes local launch commands, private key management and the small model's coding limitations.

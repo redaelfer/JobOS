@@ -10,7 +10,7 @@ A local, single-user job-search workspace. Built with Node.js 24, SQLite, and a 
 
 For generation without hosted AI quotas, download Qwen3 in **AI models**, then choose **Use local model + public search**. This uses local Ollama and public LinkedIn/web sources without an API key. Computer resources and website access still limit it. [LOCAL-SETUP.md](LOCAL-SETUP.md) includes automatic setup, restart/resume steps and a manual fallback.
 
-The primary workflow is junior software job discovery → published HR contacts → a CV and email for each opportunity. See [JOBOS.md](JOBOS.md) for the product goal and usage guide. Applications opens in list view with a direct posting link and tailoring action in every row. Applications defaults to all saved offers; Daily opportunities defaults to the recent publication window. Both sort latest published first; missing source dates appear last. Recently detected and Best CV fit are optional sort orders.
+The primary workflow is junior software job discovery → published HR contacts → a CV and email for each opportunity. See [JOBOS.md](JOBOS.md) for the product goal and usage guide. Applications opens in list view with a direct posting link and tailoring action in every row. Applications opens with **Publication → All saved**, **Sort → Recently detected** and **Stage → Saved**. Daily opportunities opens with the recent publication window and latest publication dates first.
 
 ## Start using it
 

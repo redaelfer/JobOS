@@ -1,5 +1,19 @@
 # Verification
 
+## Applications defaults and bulk closing (15 November 2026)
+
+All 281 isolated tests and the JavaScript syntax check passed. An Edge session with an isolated database verified the three initial selections (All saved, Recently detected, Saved) and the actual row order using offers with opposing publication and detection dates. Finishing a sample review exposed a bulk button below its two closure notices. One click closed the Saved and Applied matches, preserved their notes and left the unverified posting in Saved. API tests also covered retries, stale review IDs, changed links and requests made before completion.
+
+## Browser review of saved offers (15 November 2026)
+
+The isolated suite passed 280 tests and the JavaScript syntax check passed. An unpacked extension in a disposable Edge profile ran against a local HTTPS posting fixture that required a test session cookie. The fixture rendered the NGBS title, “Actively reviewing applicants” and a delayed “No longer accepting applications” notice. The review opened both eligible postings, skipped a previously Closed one, ignored a related posting's notice, and listed only the unavailable posting with its link. One click in Daily opportunities then closed that fixture and retained its notes. The smoke test used a pre-granted fixture host. The user's Chrome site-access prompt and real signed-in LinkedIn results need verification in that profile. API tests cover resume, duplicate submissions, stale tickets and a posting closed while queued.
+
+## Saved posting availability (15 November 2026)
+
+The isolated suite passed 278 tests. Source fixtures cover explicit English and French notices, restricted applicant groups, blocked pages, redirects, and unrelated or hidden notices. The API check covered a repeated start, a link edited during the run, two postings at the same employer, and preservation of stages and notes. Headless Edge exercised the check in Applications, reviewed the same report in Daily opportunities, opened the separate unverified list and closed one fixture posting in one click. The page fit a 390px viewport. JavaScript syntax checks passed.
+
+The live workspace had 35 linked postings outside Closed. The last public review showed 31 pages without an explicit closure notice, four unverified pages with manual review links, and zero confirmed closures. All application stages were preserved. Public accessibility varied between checks. A signed-in user may see a notice missing from the public page.
+
 ## Graduate role preferences and larger text (11 November 2026)
 
 The isolated suite passed all 275 tests and `npm run check` passed. Discovery tests cover the five fields on LinkedIn and Indeed, junior queries followed by ordinary titles, French data-engineering titles, and higher-level exclusions on both recent and older/undated passes. A junior role that mentions senior colleagues stays eligible. Higher-level saved jobs retain their application records and are excluded from strong recommendations under the graduate preference.

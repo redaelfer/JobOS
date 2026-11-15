@@ -1,0 +1,4 @@
+body{font:1rem/1.55 system-ui,sans-serif;background:#f6f8f4;color:#213f32;margin:0;padding:2rem 1rem}
+main{max-width:38rem;margin:8vh auto;background:white;padding:2rem;border:1px solid #cbd5cb;border-radius:12px}
+h1{margin:0;font-size:1.6rem}#sites{overflow-wrap:anywhere}
+button,a{font:inherit;color:#245d42}button{background:#286447;color:white;border:0;border-radius:6px;padding:.55rem 1rem;cursor:pointer}a{display:inline-block;margin-top:1rem}[hidden]{display:none}

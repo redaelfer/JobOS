@@ -2,11 +2,31 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { extractLinkedInJob } from '../extension/extract.js';
+import { readRenderedPosting } from '../extension/rendered-posting.js';
+import { isClosureNotice } from '../extension/closure-notice.js';
 import { readFileSync } from 'node:fs';
 function extract(html, url) {
   const dom = new JSDOM(html, { url, runScripts: 'outside-only' });
   try { return JSON.parse(JSON.stringify(dom.window.eval(`(${extractLinkedInJob.toString()})()`))); } finally { dom.window.close(); }
 }
+test('rendered NGBS card detects the closure beside actively reviewing and ignores other job cards', () => {
+  const title = 'QA Fonctionnel / Intégration SAP', url = 'https://www.linkedin.com/jobs/view/502/';
+  const dom = new JSDOM(`<main><aside><h2>${title}</h2>No longer accepting applications</aside><article><p>NGBS</p><h2>${title}</h2><p>Promoted by hirer · Actively reviewing applicants</p><p>Hybrid · Full-time</p><span hidden>No longer accepting applications</span><p id="status"></p></article><h2>Similar jobs</h2><span>No longer accepting applications</span></main>`, { url, runScripts: 'outside-only' });
+  try {
+    // JSDOM has no layout engine. The browser smoke check uses actual visibility.
+    dom.window.HTMLElement.prototype.getClientRects = () => [{}];
+    Object.defineProperty(dom.window.HTMLElement.prototype, 'innerText', { get() { return this.textContent; } });
+    const read = dom.window.eval('(' + readRenderedPosting.toString() + ')');
+    const job = { title, company: 'NGBS', url };
+    const result = read(job);
+    assert.equal(result.identified, true); assert.equal(result.lines.some(isClosureNotice), false);
+    for (const notice of ['No longer accepting applications', 'Les candidatures ne sont plus acceptées']) {
+      dom.window.document.querySelector('#status').textContent = notice;
+      assert.equal(read(job).lines.find(isClosureNotice), notice);
+    }
+    assert.equal(read({ ...job, url: url.replace('502', '952') }).identified, false);
+  } finally { dom.window.close(); }
+});
 test('extension extracts an authenticated LinkedIn job detail fixture', () => {
   const job = extract('<div class="job-details-jobs-unified-top-card__job-title"><h1>React Engineer</h1></div><div class="job-details-jobs-unified-top-card__company-name">Example</div><div class="job-details-jobs-unified-top-card__primary-description-container"><span class="tvm__text">Remote</span></div><div class="jobs-description__content">React and SQL</div>', 'https://www.linkedin.com/jobs/search/?currentJobId=987');
   assert.equal(job.title, 'React Engineer'); assert.equal(job.company, 'Example'); assert.equal(job.location, 'Remote'); assert.equal(job.description, 'React and SQL'); assert.equal(job.url, 'https://www.linkedin.com/jobs/view/987/');
@@ -25,7 +45,9 @@ test('extension ignores invalid JSON and supports public-page selectors', () => 
 });
 test('extension requests only user-triggered page access and local endpoint access', () => {
   const manifest = JSON.parse(readFileSync(new URL('../extension/manifest.json', import.meta.url)));
-  assert.equal(manifest.manifest_version, 3); assert.deepEqual(manifest.permissions, ['activeTab', 'scripting', 'storage']); assert.equal(manifest.content_scripts, undefined);
+  assert.equal(manifest.manifest_version, 3); assert.deepEqual(manifest.permissions, ['activeTab', 'scripting', 'storage']);
+  assert.deepEqual(manifest.content_scripts[0].matches, manifest.host_permissions);
+  assert.deepEqual(manifest.optional_host_permissions, ['https://*/*']);
   assert.ok(manifest.host_permissions.every(h => /localhost|127\.0\.0\.1/.test(h)));
 });
 test('new LinkedIn layout captures a semantic h2 title, company and location without legacy classes', () => {

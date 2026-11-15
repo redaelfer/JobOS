@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { JSDOM } from 'jsdom';
 import { stages, analyzeResume, jobUrl } from '../lib/domain.js';
 import { dailyOpportunities, filterOpportunities, opportunityCards } from '../public/opportunities-view.js';
-import { applicationContacts, applicationList, closeOpportunityButton, searchNowButton } from '../public/application-tools.js';
+import { applicationContacts, applicationList, availabilityReview, closeOpportunityButton, searchNowButton } from '../public/application-tools.js';
 import { orderJobs, matchesPublication } from '../public/job-order.js';
 import { tailoringPage, tailoringResult, emailDraftUrl } from '../public/tailoring-view.js';
 import { aiModelsPage, updateAIForm, modelDownloadStatus, groundingSuggestions, aiQuotaHelp, searchAccessHelp, localModelCatalog } from '../public/ai-settings-view.js';
@@ -51,7 +51,7 @@ async function setup(t, page = 'search', jobs = [], workflows = {}) {
     return { ok: true, json: async () => structuredClone(value) };
   } });
   t.after(async () => { await new Promise(resolve => setImmediate(resolve)); dom.window.close(); });
-  Object.assign(dom.window, { uniqueSearchWarnings, searchSummary, searchFailureText, searchRunSource, searchSourceLabel, searchAccessHelp, closeOpportunityButton, localModelCatalog, helpPage });
+  Object.assign(dom.window, { uniqueSearchWarnings, searchSummary, searchFailureText, searchRunSource, searchSourceLabel, searchAccessHelp, availabilityReview, closeOpportunityButton, localModelCatalog, helpPage });
   dom.window.eval(source);
   await settle(() => !!dom.window.document.querySelector('h1'));
   return { dom, document: dom.window.document, calls, state, network, poll: () => intervals.find(timer => timer.delay === 3000).callback() };
@@ -109,6 +109,8 @@ for (const layout of ['list', 'board']) test(`Applications ${layout} closes an o
   assert.equal(state.jobs.length, 1); assert.equal(state.jobs[0].notes, 'Not my domain.'); assert.equal(state.jobs[0].stage, 'Closed');
   assert.match(document.querySelector('#toast').textContent, /History and notes kept/);
   if (layout === 'board') document.querySelector('[data-action="list-view"]').click();
+  const stageFilter = document.querySelector('#stage-filter');
+  stageFilter.value = 'All stages'; stageFilter.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
   const stage = document.querySelector('[data-stage-job="close-me"]'); assert.equal(stage.value, 'Closed');
   stage.value = 'Saved'; stage.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
   await settle(() => !!document.querySelector('[data-action="close-job"]'));
@@ -251,14 +253,18 @@ test('a failed draft is distinguished from a search and its error is rendered sa
 test('application publication filter and newest sorting work together in list and board views', async t => {
   const stamp = new Date().toISOString(), ago = days => new Date(Date.now() - days * 86400000).toISOString();
   const base = { title: 'Junior Software Engineer', company: 'Acme', location: 'Morocco', description: 'Develop software with Python and SQL.', stage: 'Saved', source: 'Manual', createdAt: stamp, updatedAt: stamp };
-  const jobs = [{ ...base, id: 'old', postedAt: ago(40) }, { ...base, id: 'new', postedAt: ago(0.25) }, { ...base, id: 'unknown', postedAt: '' }, { ...base, id: 'week', postedAt: ago(3), stage: 'Applied' }];
+  const jobs = [{ ...base, id: 'old', postedAt: ago(40), detectedAt: ago(1) }, { ...base, id: 'new', postedAt: ago(0.25), detectedAt: ago(0.2) }, { ...base, id: 'unknown', postedAt: '', detectedAt: stamp }, { ...base, id: 'week', postedAt: ago(3), stage: 'Applied' }];
   const { dom, document, calls } = await setup(t, 'pipeline', jobs);
   const selector = document.querySelector('#job-posted'), sort = document.querySelector('#job-sort');
   const ids = () => [...document.querySelectorAll('tbody [data-action="edit-job"]')].map(button => button.dataset.id);
-  assert.equal(selector.value, 'all'); assert.equal(sort.value, 'newest'); assert.deepEqual(ids(), ['new', 'week', 'old', 'unknown']);
+  assert.equal(selector.value, 'all'); assert.equal(sort.value, 'detected');
+  assert.equal(document.querySelector('#stage-filter').value, 'Saved');
+  assert.deepEqual(ids(), ['unknown', 'new', 'old']);
+  sort.value = 'newest'; sort.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  assert.deepEqual(ids(), ['new', 'old', 'unknown']);
   assert.deepEqual([...selector.options].map(option => option.value), ['all', '1', '7', '14', '30', 'unknown']);
   selector.value = '7'; selector.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
-  assert.deepEqual(ids(), ['new', 'week']);
+  assert.deepEqual(ids(), ['new']);
   const stage = document.querySelector('#stage-filter'); stage.value = 'Applied'; stage.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
   assert.deepEqual(ids(), ['week']);
   document.querySelector('[data-action="board-view"]').click();
