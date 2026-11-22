@@ -1,4 +1,4 @@
-import { extractLinkedInJob } from './extract.js';
+import { captureJob, captureSource } from './capture-reader.js';
 const status = document.querySelector('#status'), form = document.querySelector('#capture');
 function message(text, error = false) { status.textContent = text; status.classList.toggle('error', error); }
 async function capture() {
@@ -6,13 +6,7 @@ async function capture() {
   try {
     message('Reading the selected job…');
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    let result, error;
-    for (let attempt = 0; attempt < 4; attempt++) {
-      [{ result, error }] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: extractLinkedInJob });
-      if (error || (result?.title && result?.company && result?.description)) break;
-      if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 600));
-    }
-    if (error || !result) throw new Error(error?.message || 'Could not read this job. Open a LinkedIn job, or fill the fields manually.');
+    const result = await captureJob(chrome, tab);
     for (const [key, value] of Object.entries(result)) if (form.elements.namedItem(key)) form.elements.namedItem(key).value = value;
     const missing = ['title', 'company', 'description'].filter(key => !result[key]);
     message(missing.length ? `Could not read ${missing.join(', ')}. Open the full job page, wait for it to load, and click “Capture current job again”. You can also fill the missing fields.` : 'Job captured. Review the details, then save.', missing.length > 0);
@@ -37,7 +31,8 @@ form.addEventListener('submit', async e => {
   try {
     const config = await chrome.storage.local.get(['endpoint', 'token']);
     if (!config.token) throw new Error('Add your pairing token in Connection settings first.');
-    const res = await fetch(`${config.endpoint || 'http://127.0.0.1:4317'}/api/capture`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-JobOS-Token': config.token }, body: JSON.stringify({ ...Object.fromEntries(new FormData(form)), source: 'LinkedIn extension' }), signal: AbortSignal.timeout(10000) });
+    const values = Object.fromEntries(new FormData(form));
+    const res = await fetch(`${config.endpoint || 'http://127.0.0.1:4317'}/api/capture`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-JobOS-Token': config.token }, body: JSON.stringify({ ...values, source: captureSource(values.url) || 'Manual extension capture' }), signal: AbortSignal.timeout(10000) });
     const result = await res.json(); if (!res.ok) throw new Error(result.error);
     message(result.skipped ? result.reason : result.created ? 'Saved to your JobOS workspace.' : result.updated ? 'Added captured details to your imported opportunity.' : 'This opportunity is already saved.');
   } catch (error) { message(error.message === 'Failed to fetch' ? 'Cannot reach JobOS. Start the server and check the address.' : error.message, true); }

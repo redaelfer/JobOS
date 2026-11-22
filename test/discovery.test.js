@@ -26,7 +26,10 @@ test('unreadable pages clear unsupported descriptions and closed postings are la
 });
 test('search runs Codex with live web search and no CV input', async () => {
   const runner = async (args, opts) => { assert.ok(args.includes('web_search="live"')); assert.ok(args.includes('shell_tool')); assert.match(opts.stdin, /site:linkedin.com\/jobs\/view/); assert.ok(!opts.stdin.includes('resume":')); await writeFile(args[args.indexOf('--output-last-message') + 1], JSON.stringify({ summary: 'One role found', jobs: [job()] })); return { code: 0 }; };
-  const result = await searchWithCodex(prefs, runner, async result => result); assert.equal(result.jobs.length, 1);
+  const batches = [];
+  const result = await searchWithCodex(prefs, runner, async result => ({ ...result, jobs: result.jobs.map(j => ({ ...j, verification:'Title and company found on public posting' })) }), batch => batches.push(...batch));
+  assert.equal(result.jobs.length, 1); assert.equal(batches.length, 1);
+  const unreadable = await searchWithCodex(prefs, runner, async result => result); assert.equal(unreadable.jobs.length, 0);
   await assert.rejects(searchWithCodex(prefs, async () => ({ code: 1 })), /could not finish/);
   assert.match(discoveryPrompt(prefs), /empty jobs array/);
 });

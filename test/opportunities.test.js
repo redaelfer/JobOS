@@ -61,13 +61,13 @@ test('daily UI renders controls and escapes scraped text and unsafe fallback lin
   assert.equal(dom.window.document.querySelectorAll('img,[onerror],a[href^="javascript:"]').length, 0);
   assert.match(dom.window.document.body.textContent, /Who to contact/); dom.window.close();
 });
-test('hourly scan researches previously saved employers and retries empty research after a day', async () => {
+test('manual discovery leaves previously saved employers alone', async () => {
   let names, scored;
   const result = await performAutomatedScan({ settings: { ...settings, resumeHash: resumeFingerprint(settings) }, knownJobs: [job], companies: [{ name: 'Acme', researchVersion: 2, researchedAt: new Date(Date.now() - 2 * 86400000).toISOString(), contacts: [], recruitmentTeam: [] }], rankings: [report()], search: async p => { assert.ok(p.knownUrls.includes(job.url)); assert.equal(p.includeEmployerSites, true); return { summary: 'No new jobs', jobs: [] }; }, research: async (input, context) => { names = input; assert.equal(context[0].title, job.title); return []; }, rank: async () => { scored = true; }, saveJob: () => {}, saveCompany: () => {} });
-  assert.deepEqual(names, ['Acme']); assert.equal(scored, undefined); assert.equal(result.newJobIds.length, 0);
+  assert.equal(names, undefined); assert.equal(scored, undefined); assert.equal(result.newJobIds.length, 0);
 });
-test('preference changes requeue readable jobs and ranking batches respect the input budget', async () => {
+test('changing preferences does not automatically rank old jobs', async () => {
   const jobs = Array.from({ length: 5 }, (_, i) => ({ ...job, id: String(i), description: 'Python '.repeat(7000) }));
   const result = await performAutomatedScan({ settings: { ...settings, searchDomains: 'AI engineering', resumeHash: resumeFingerprint(settings) }, knownJobs: jobs, rankings: [report()], search: async () => ({ summary: 'No new jobs', jobs: [] }), research: async () => [], rank: async input => { assert.equal(input.preferences.domains[0], 'AI engineering'); assert.ok(input.jobs.reduce((n, j) => n + j.description.length, input.resume.length) <= 120000); return { summary: 'Ranked', rankings: [] }; }, saveJob: () => {}, saveCompany: () => {} });
-  assert.equal(result.rankedJobs.length, 5); assert.equal(result.pendingRankings, 0);
+  assert.equal(result.report, undefined); assert.deepEqual(result.newJobIds, []);
 });

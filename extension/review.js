@@ -26,7 +26,7 @@ async function closeTab() {
   }
 }
 async function inspect(job) {
-  const tab = await chrome.tabs.create({ url: job.url, active: false });
+  const tab = await chrome.tabs.create({ url: job.navigationUrl || job.url, active: false });
   tabId = tab.id;
   const deadline = Date.now() + 25000;
   let identifiedSince = 0;

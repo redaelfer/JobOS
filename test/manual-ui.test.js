@@ -20,7 +20,7 @@ const settle = async predicate => { for (let i = 0; i < 30; i++) { if (predicate
 async function setup(t, page = 'search', jobs = [], workflows = {}) {
   const settings = { resume: 'Synthetic engineer with Python and SQL software development skills.', token: 'synthetic-token', searchDomains: 'Software engineering', searchLocation: 'Morocco and remote roles', searchLevel: 'Graduate / Entry level', searchExclude: 'senior, unpaid', searchMaxAgeDays: 30, minimumFit: 70 };
   const state = { ai: publicAI({}, credentialStore(null, {})), modelDownloads: [], settings, jobs, rankings: [], searches: [], scans: [], tailorings: [], companies: [], contacts: [], reminders: [], alerts: [], mailbox: {}, opportunities: buildOpportunities({ settings, jobs }), ...workflows };
-  const calls = [], intervals = [], network = { fail: false, searchTest: null, jobPatchError: '', localModels: [{ name: 'qwen3:4b', size: 2500000000, parameters: '4B' }] };
+  const calls = [], intervals = [], network = { fail: false, searchTest: null, jobPatchError: '', browserStopError: '', localModels: [{ name: 'qwen3:4b', size: 2500000000, parameters: '4B' }] };
   const dom = new JSDOM(html, { url: 'http://jobos.test/#' + page, runScripts: 'outside-only' });
   Object.assign(dom.window, { stages, analyzeResume, jobUrl, dailyOpportunities, filterOpportunities, opportunityCards, applicationContacts, applicationList, searchNowButton, orderJobs, matchesPublication, tailoringPage, tailoringResult, emailDraftUrl, aiModelsPage, updateAIForm, modelDownloadStatus, groundingSuggestions, aiQuotaHelp, setInterval: (callback, delay) => { intervals.push({ callback, delay }); return intervals.length; }, fetch: async (path, options = {}) => {
     const body = options.body ? JSON.parse(options.body) : undefined;
@@ -31,6 +31,10 @@ async function setup(t, page = 'search', jobs = [], workflows = {}) {
       Object.assign(state.jobs.find(job => job.id === path.split('/').at(-1)), body);
     }
     let value = state;
+    if (/^\/api\/codex\/scan\/[^/]+\/browser$/.test(path) && body?.action === 'stop') {
+      if (network.browserStopError) return { ok: false, json: async () => ({ error: network.browserStopError }) };
+      state.scans.find(r => r.id === path.split('/')[4]).status = 'completed'; value = { done: true };
+    }
     if (path === '/api/ai/config') {
       if (body.expectedRevision !== state.ai.revision) return { ok: false, json: async () => ({ error: 'AI settings changed. Reload saved settings before saving.' }) };
       state.ai = publicAI(updateAIConfig(state.ai, body), credentialStore(null, {})); value = state.ai;
@@ -56,6 +60,71 @@ async function setup(t, page = 'search', jobs = [], workflows = {}) {
   await settle(() => !!dom.window.document.querySelector('h1'));
   return { dom, document: dom.window.document, calls, state, network, poll: () => intervals.find(timer => timer.delay === 3000).callback() };
 }
+test('paused Indeed shows browser instructions and an enabled explicit fresh-search action', async t => {
+  const { document, calls } = await setup(t, 'pipeline', [], { scans: [{ id: 'browser-run', status: 'paused', browserIndeed: true, phase: 'Complete verification, then Resume', createdAt: new Date().toISOString(), newJobIds: [] }] });
+  assert.match(document.querySelector('#indeed-browser-status').textContent, /Chrome.*0.4/s);
+  assert.equal(document.querySelector('[data-action="scan-now"]').disabled, false);
+  assert.equal(document.querySelector('[data-action="scan-now"]').textContent, 'Start a new search');
+  assert.equal(document.querySelector('[data-action="scan-now"]').getAttribute('aria-busy'), 'false');
+  assert.match(document.querySelector('[data-action="scan-now"]').title, /Ends the paused Indeed step/);
+  assert.ok(document.querySelector('[data-action="indeed-resume"]'));
+  assert.ok(document.querySelector('[data-action="indeed-stop"]'));
+  assert.match(document.querySelector('#workflow-status').textContent, /No AI model is running/);
+  assert.equal(calls.filter(c => c.method === 'POST').length, 0);
+});
+for (const page of ['pipeline', 'search']) test(`${page}: fresh search ends only the observed paused step before starting, without deleting records`, async t => {
+  const jobs = [{ id: 'keep', title: 'Junior engineer', company: 'Fixture', stage: 'Saved', url: 'https://example.org/job', notes: 'Keep my notes' }];
+  const { dom, document, calls, state } = await setup(t, page, jobs, { scans: [{ id: 'old', status: 'paused', browserIndeed: true, newJobIds: ['keep'] }] });
+  const button = document.querySelector(page === 'pipeline' ? '[data-action="scan-now"]' : '#linkedin-search-form button:not([type])');
+  button.click(); button.click();
+  await settle(() => calls.some(c => c.path === '/api/codex/scan'));
+  assert.equal(calls.filter(c => c.path === '/api/codex/scan').length, 1);
+  const stop = calls.find(c => c.path.endsWith('/old/browser'));
+  assert.deepEqual(stop.body, { action: 'stop', expectedStatus: 'paused' });
+  assert.ok(calls.indexOf(stop) < calls.findIndex(c => c.path === '/api/codex/scan'));
+  assert.equal(state.jobs.length, 1); assert.equal(state.jobs[0].notes, 'Keep my notes');
+  assert.equal(calls.some(c => c.method === 'DELETE'), false);
+});
+test('a changed paused step prevents a fresh scan and leaves recovery controls usable', async t => {
+  const { document, calls, network } = await setup(t, 'pipeline', [], { scans: [{ id: 'old', status: 'paused', browserIndeed: true, newJobIds: [] }] });
+  network.browserStopError = 'The Indeed search changed. Refresh its status before starting another search.';
+  document.querySelector('[data-action="scan-now"]').click();
+  await settle(() => document.querySelector('#toast').textContent.includes('Indeed search changed'));
+  assert.equal(calls.some(c => c.path === '/api/codex/scan'), false);
+  assert.equal(document.querySelector('[data-action="scan-now"]').disabled, false);
+  assert.ok(document.querySelector('[data-action="indeed-resume"]'));
+});
+test('refresh status updates newly saved offers, summary and count even when discovery just finished', async t => {
+  const { document, state } = await setup(t, 'pipeline', [], { scans: [{ id: 'finished', status: 'running', createdAt: new Date().toISOString(), newJobIds: [] }] });
+  state.jobs.push({ id: 'late', title: 'Junior Data Scientist', company: 'Fixture', stage: 'Saved', location: 'Morocco', url: 'https://ma.indeed.com/viewjob?jk=123456789abcdef0' });
+  state.scans = [{ id: 'finished', status: 'completed', createdAt: new Date().toISOString(), completedAt: new Date().toISOString(), newJobIds: ['late'], sourceResults: [] }];
+  document.querySelector('[data-action="refresh-status"]').click();
+  await settle(() => document.querySelector('#job-count').textContent === '1');
+  assert.match(document.querySelector('#jobs-area').textContent, /Junior Data Scientist/);
+  assert.match(document.querySelector('#main').textContent, /1 new in last search/);
+  assert.doesNotMatch(document.querySelector('#main').textContent, /Search in progress/);
+});
+test('Indeed source selector and setup check do not start a search', async t => {
+  const { document, calls } = await setup(t);
+  assert.equal(document.querySelector('[name="indeedSearchMode"]').value, 'browser');
+  document.querySelector('[data-action="indeed-setup-test"]').click();
+  assert.match(document.querySelector('#toast').textContent, /Chrome/);
+  assert.equal(calls.filter(c => c.method === 'POST').length, 0);
+});
+test('Indeed opportunity scope saves visibly without starting a search or modifying general preferences', async t => {
+  const { dom, document, calls, state } = await setup(t);
+  const before = state.settings.searchLocation;
+  const select = document.querySelector('[name="indeedOpportunityScope"]');
+  assert.equal(select.value, 'preferences');
+  select.value = 'morocco-junior-remote';
+  document.querySelector('#indeed-settings').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+  await settle(() => document.querySelector('#toast').textContent.includes('Indeed settings saved'));
+  assert.equal(state.settings.indeedOpportunityScope, 'morocco-junior-remote');
+  assert.equal(document.querySelector('[name="indeedOpportunityScope"]').value, 'morocco-junior-remote');
+  assert.equal(state.settings.searchLocation, before);
+  assert.equal(calls.filter(c => c.method === 'POST').length, 0);
+});
+
 test('actual search form has posting-window controls and saves them before a manual request', async t => {
   const { dom, document, calls, state } = await setup(t);
   assert.equal(document.querySelector('[name="limit"]'), null);
@@ -81,7 +150,7 @@ test('actual daily UI defaults to recent dates and retains historical offers thr
   const stamp = new Date().toISOString();
   const base = { title: 'Junior Software Engineer', company: 'Acme', location: 'Morocco', description: 'Build software with Python and SQL.', stage: 'Saved', source: 'Manual', createdAt: stamp, sourceCheckedAt: stamp, updatedAt: stamp };
   const jobs = [{ ...base, id: 'new', postedAt: '1 day ago' }, { ...base, id: 'old', postedAt: '4 months ago' }, { ...base, id: 'unknown', postedAt: '' }];
-  const { dom, document } = await setup(t, 'daily', jobs);
+  const { dom, document } = await setup(t, 'daily-report', jobs);
   assert.equal(document.querySelector('#daily-posted').value, 'recent');
   assert.equal(document.querySelectorAll('.opportunity-card').length, 1);
   const selector = document.querySelector('#daily-posted'); selector.value = 'all';
@@ -281,7 +350,7 @@ test('application publication filter and newest sorting work together in list an
 test('daily publication controls expose recent windows and never hide unknown records from All saved', async t => {
   const stamp = new Date().toISOString(), base = { title: 'Junior Software Engineer', company: 'Acme', location: 'Morocco', description: 'Develop software with Python and SQL.', stage: 'Saved', createdAt: stamp, updatedAt: stamp };
   const jobs = [{ ...base, id: 'today', postedAt: new Date(Date.now() - 2 * 3600000).toISOString() }, { ...base, id: 'older', postedAt: new Date(Date.now() - 10 * 86400000).toISOString() }, { ...base, id: 'unknown', postedAt: '' }];
-  const { dom, document } = await setup(t, 'daily', jobs);
+  const { dom, document } = await setup(t, 'daily-report', jobs);
   const selector = document.querySelector('#daily-posted');
   assert.ok(['1', '7', '14', '30'].every(value => [...selector.options].some(option => option.value === value)));
   selector.value = '1'; selector.dispatchEvent(new dom.window.Event('change', { bubbles: true }));

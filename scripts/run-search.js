@@ -26,13 +26,17 @@ while (Date.now() < deadline) {
   if (!response.ok) throw new Error('Could not read search status.');
   const run = await response.json();
   if (run.status === 'running') continue;
+  if (['waiting_browser', 'paused'].includes(run.status) && run.browserIndeed) {
+    console.log(JSON.stringify({ status: run.status, scanId: run.id, newJobs: run.newJobIds?.length || 0, message: 'LinkedIn step is saved. Open JobOS in Chrome with extension 0.4+ and use Open / resume Indeed. Keep its controller tab open.', feedUrl: base.replace('/api/', '/#pipeline') }));
+    process.exit(0);
+  }
   if (run.status === 'failed') throw new Error(run.error);
   const latest = await getState();
-  const previousMatches = new Set((state.opportunities?.items || []).filter(j => j.recommended).map(j => j.jobId));
-  const newMatches = (latest.opportunities?.items || []).filter(j => j.recommended && !previousMatches.has(j.jobId));
+  const newIds = new Set(run.newJobIds);
+  const newMatches = (latest.opportunities?.items || []).filter(j => newIds.has(j.jobId));
   const previousContacts = new Set(state.contacts.map(c => `${c.company}|${c.name}|${c.email}|${c.linkedin}`));
   const newContacts = latest.contacts.filter(c => !previousContacts.has(`${c.company}|${c.name}|${c.email}|${c.linkedin}`));
-  console.log(JSON.stringify({ status: run.status, newJobs: run.newJobIds.length, newJobIds: run.newJobIds, companiesResearched: run.companiesResearched, rankingId: run.rankingId, newRelevantJobs: newMatches.map(j => ({ id: j.jobId, title: j.title, company: j.company, url: j.url, score: j.score })), newContactCount: newContacts.length, pendingDescriptions: run.pendingDescriptions, pendingRankings: run.pendingRankings, warnings: run.warnings, summary: run.summary, feedUrl: base.replace('/api/', '/#daily') }));
+  console.log(JSON.stringify({ status: run.status, newJobs: run.newJobIds.length, newJobIds: run.newJobIds, employerLookupsPending: latest.employerLookupsPending, newRelevantJobs: newMatches.map(j => ({ id: j.jobId, title: j.title, company: j.company, url: j.url })), newContactCount: newContacts.length, warnings: run.warnings, summary: run.summary, feedUrl: base.replace('/api/', '/#pipeline') }));
   process.exit(0);
 }
 throw new Error('The scan is still running. Check its status in JobOS.');

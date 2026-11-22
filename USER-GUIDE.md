@@ -24,6 +24,10 @@ npm run doctor
 
 Doctor uses local HTTP checks and prints setup facts only. It does not generate text, search public sites, send a CV or consume an AI API quota. A service being reachable does not establish model quality or live website access.
 
+## Choose Indeed coverage
+
+For Indeed search coverage, open **Settings → Search preferences → Indeed search connection** and select **Indeed opportunities → Morocco roles + junior remote**, then **Save Indeed settings**. The next manual Search now includes relevant Morocco roles even without “junior” in the title, excludes explicit advanced requirements, and keeps remote roles only with junior/entry-level evidence and no recognized country restriction excluding Morocco. Read the eligibility warnings before applying. Existing saved offers stay available for your own review; this setting does not clean them up automatically or change LinkedIn searches.
+
 ## Download a model from the app
 
 1. Open **AI models** in the sidebar.
@@ -48,6 +52,19 @@ npm run model:download -- qwen3:4b --use
 ```
 
 These commands use the same authenticated download workflow and show progress. They do not require a coding model or an Ollama command on PATH. Use another terminal for them; keep the JobOS server terminal running. A conflicting active AI workflow is rejected. After switching, test the model in the app.
+
+## Search LinkedIn, then Indeed
+
+1. Restart JobOS after updating the code. In **Chrome**, open `chrome://extensions` and reload the unpacked **JobOS** extension. Its version must be **0.4.1** or newer. For first installation, Load unpacked selects the `extension` folder in this project.
+2. Open [JobOS](http://127.0.0.1:4317/) in the same Chrome profile and refresh the page. The Codex in-app browser cannot run the Chrome extension.
+3. In **Settings → Search preferences → Indeed search connection**, leave **Chrome session** selected. Check Indeed browser setup only checks extension presence; live access can still fail.
+4. Click **Search now** once. LinkedIn/company careers run first. Partial successes remain saved even if a source is throttled. The Indeed controller opens afterward; on first use, click **Allow access to Indeed**.
+5. Keep Chrome, the JobOS server and the controller open. You do not have to open Indeed in advance. If asked to verify/sign in, use **Open Indeed tab**, complete it yourself, return to the controller and click **Resume**. JobOS never solves a challenge.
+6. Unsupported pages pause too, with missing fields shown separately from verification requests. **Skip this unreadable page** continues with incomplete coverage; **Stop Indeed · keep saved offers** ends just that step. A paused search does not hold the AI-model lock. Resume uses the preferences captured when that search began. After a server/browser restart, use **Open / resume Indeed** in JobOS to continue the saved cursor. **Start a new search** ends the paused Indeed step, keeps its saved offers/contacts and searches again from LinkedIn using your current preferences. Paused does not mean loading.
+
+Readable roles are checked against saved fields/level/exclusions and the date window. Older/undated roles remain marked for review when broader coverage is enabled. Posting identity deduplicates variants; closed, expired and deleted offers stay excluded, while a distinct posting at the same employer may appear. Recruiting research uses the separate configured web source and can still be blocked. Nothing is applied to or sent automatically.
+
+To use your configured search API or the older public-server path instead, choose **Configured search provider** and Save Indeed source before a new run. Opening Indeed manually does not fix HTTP 403 in that mode because server requests do not use Chrome cookies. No route guarantees exhaustive coverage or bypasses site restrictions.
 
 ## Choose search independently
 
@@ -81,21 +98,19 @@ Check **AI models → Live search source**. For the local setup it should be **L
 
 ## Daily use
 
-1. **CV & AI ranking:** upload/paste your real CV text and save it.
-2. **CV & email tailoring:** paste/upload your standalone master `main.tex` and save it. Keep this master accurate. Tailored results change its text positions and are saved separately; formatting is not redesigned.
-3. **Job search:** save your domains, junior experience level, Morocco/eligible remote preferences, exclusions and posting window. Default recent coverage is 30 days. Broader coverage can also retain older/undated postings for availability review.
-4. Click **Search now**. The app searches the selected sources, checks readable descriptions, deduplicates, researches source-backed recruitment contacts and compares offers with the saved CV. No fixed number of results is promised. No hourly search is enabled.
-5. **Daily opportunities / Applications:** inspect posting links, source publication dates, eligibility, CV fit/gaps and contact evidence. A low fit score does not remove a saved offer. Missing emails are not guessed.
-6. Click **Tailor CV & email** on an offer, choose French/English and **Analyze offer first**. Review the key requirements, quoted evidence and missing/uncertain qualifications. Generate the CV/email draft, inspect facts and the compiled PDF, then send it yourself.
-7. Click **Close** on an unwanted offer. It keeps its ID, stage and notes during rediscovery. Reopen it through Stage. Deleting an offer remembers its posting identity so future imports/searches skip it.
+1. In **Settings → Search preferences**, save your domains, experience level, location and date window once. A new workspace starts with data science, ML, AI engineering, full-stack and data engineering; graduate/entry level; Morocco and eligible remote roles; and 30 days. Existing preferences are kept.
+2. Open **Offers** and click **Search now**. No CV is needed and searches are manual. Verified batches appear as they arrive. Choose **New in last search** to isolate what was actually added. If a source fails, retry just that source; its results join the original search. There is no result quota. Older/undated postings are marked for availability review; an unknown date is not a new publication.
+3. Read the posting, keywords and contact evidence. Published recruiting addresses appear first. Employer lookup runs separately. A general business address, a contact published for an earlier vacancy, or an unconfirmed professional profile is not a verified HR email.
+4. For a role you want, click **Tailor CV & email**. Save your accurate master `main.tex` once via **Settings → Master main.tex & drafts**. JobOS analyzes the requirements and drafts using this master, without a second CV upload. The offer language is selected by default (French/English); change it if needed. Review the separate CV and use **Copy recipient**, **Copy subject** and **Copy body**. Nothing is sent automatically.
+5. Use **Close** to skip an offer. Use **Check saved offers in browser** to find postings that explicitly stopped accepting applications. Review each notice and link, then select **Move to Expired** or **Expire all confirmed**. See archived postings with **Stage → Expired**. The archive keeps contacts, notes and drafts; jobs you already applied for also keep their application stage. A different posting from that employer can still appear.
 
 PDF compilation needs an installed/configured LaTeX compiler. If PDF compilation is unavailable, the separate `.tex` source and editable email can still be reviewed; see the draft's notes. Do not overwrite the master to fix a tailored draft. Never accept invented qualifications or contact details from a model.
 
 ### Check whether saved offers still accept applications
 
-1. Use the Chrome profile where you open LinkedIn. At `chrome://extensions`, reload the **JobOS — LinkedIn capture** extension after updating it. For a first installation, choose **Developer mode → Load unpacked** and select the project's `extension` folder. Refresh the JobOS tab.
+1. Use the Chrome profile where you open LinkedIn. At `chrome://extensions`, reload the **JobOS — job capture & Indeed search** extension after updating it. For a first installation, choose **Developer mode → Load unpacked** and select the project's `extension` folder. Refresh the JobOS tab.
 2. In **Applications → Application availability**, click **Check saved offers in browser**. If Chrome requests access, review the listed posting sites and allow them. Keep the JobOS review tab open while it checks each posting.
-3. Open each link under **No longer accepting applications** to verify the notice. Click **Close** beside one offer, or use **Close all unavailable offers** below the list once the check finishes. The number on the button counts the postings it will close. Use **Open unverified offers** for pages the browser could not read.
+3. Review the notice and posting link. Click **Move to Expired**, or **Expire all confirmed** after the check finishes. Blocked/unreadable pages remain available only for manual review. An expired posting is not a rejection; Applied and later stages are preserved.
 
 ## Optional API alternatives
 
@@ -138,3 +153,8 @@ npm run check
 ```
 
 These tests/checks do not require a coding assistant. Keep this guide and [LOCAL-AI-WORKFLOW.md](LOCAL-AI-WORKFLOW.md) available even if you lose access to hosted AI services.
+
+
+## Capture an Indeed offer manually
+
+Open the full Indeed offer, then click the JobOS extension. Version **0.4.1+** reads both the older layout and the newer standalone posting layout. Review the filled title, company, location, posting URL and description, then click **Save opportunity**. If the page was still loading, use **Capture current job again**. Capture reads the visible posting and does not open an application or send your CV. After updating extension files, reload JobOS at `chrome://extensions` and reopen its popup; for a running search, resume from JobOS to open the updated controller.

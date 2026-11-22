@@ -59,7 +59,7 @@ test('source checks replace claimed ages with displayed posting dates and reject
   assert.equal(selectSearchMatches(employer, preferences).jobs.length, 1);
 });
 
-test('manual workflow researches and ranks all 24 jobs in bounded sequential batches', async () => {
+test('manual workflow saves all 24 jobs without making discovery wait for research or scores', async () => {
   // This checks batching against the workflow's real clock, not the fixed
   // October clock used by the publication-policy cases above.
   const jobs = Array.from({ length: 24 }, (_, i) => ({ ...posting(i, { sourceCheckedAt: new Date().toISOString() }), id: `job-${i}`, company: `Employer-${i % 8}`, stage: 'Saved', updatedAt: 'same' }));
@@ -67,9 +67,8 @@ test('manual workflow researches and ranks all 24 jobs in bounded sequential bat
   const researchSizes = [], rankSizes = [], saved = [];
   let active = 0;
   const result = await performAutomatedScan({ settings, knownJobs: [], search: async p => { assert.equal('limit' in p, false); return { summary: 'Found', jobs }; }, research: async names => { researchSizes.push(names.length); return names.map(name => ({ name, contacts: [], recruitmentTeam: [] })); }, rank: async ({ jobs: batch, resume }) => { assert.equal(active++, 0); assert.ok(batch.reduce((n, j) => n + j.description.length, resume.length) <= 120000); await new Promise(resolve => setImmediate(resolve)); active--; rankSizes.push(batch.length); return { summary: 'Compared synthetic records', rankings: batch.map(j => ({ jobId: j.id, score: 80 })) }; }, saveJob: job => { saved.push(job); return { job, created: true }; }, saveCompany: () => {} });
-  assert.equal(saved.length, 24); assert.equal(result.newJobIds.length, 24); assert.equal(result.report.rankings.length, 24);
-  assert.deepEqual(researchSizes, [6, 2]); assert.deepEqual(rankSizes, [10, 10, 4]);
-  assert.equal(result.pendingRankings, 0); assert.equal(result.companiesResearched, 8);
+  assert.equal(saved.length, 24); assert.equal(result.newJobIds.length, 24); assert.equal(result.report, undefined);
+  assert.deepEqual(researchSizes, []); assert.deepEqual(rankSizes, []);
 });
 
 test('search window changes do not make historical CV scores stale', () => {

@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { extractLinkedInJob } from '../extension/extract.js';
+import { captureJob, captureSource } from '../extension/capture-reader.js';
+import { readIndeedPage } from '../extension/indeed-reader.js';
 import { readRenderedPosting } from '../extension/rendered-posting.js';
 import { isClosureNotice } from '../extension/closure-notice.js';
 import { readFileSync } from 'node:fs';
@@ -64,4 +66,30 @@ test('LinkedIn global notification heading is never used as the job title', () =
 });
 test('feedback headings are excluded from job-title detection', () => {
   const j = extract('<main><h2>Are these results helpful?</h2><article><a href="/company/orange-business/">Orange Business</a><h2>Data Engineer</h2><button>Apply</button></article></main>', 'https://www.linkedin.com/jobs/view/4472945902/'); assert.equal(j.title, 'Data Engineer');
+});
+
+test('popup dispatches Indeed and LinkedIn capture to their own readers and retains the source', async () => {
+  for (const [url, func, source] of [['https://ma.indeed.com/viewjob?jk=0000000000000001', readIndeedPage, 'Indeed extension'], ['https://www.linkedin.com/jobs/view/123/', extractLinkedInJob, 'LinkedIn extension']]) {
+    let calls = 0;
+    const job = { title: 'Junior Engineer', company: 'Fixture', description: 'Python and SQL', url };
+    const api = { scripting: { executeScript: async request => {
+      calls++; assert.equal(request.func, func); assert.equal(request.target.tabId, 42);
+      if (func === readIndeedPage) { assert.equal(request.args[0].url, url); return [{ result: { ready: true, job } }]; }
+      return [{ result: job }];
+    } } };
+    assert.deepEqual(await captureJob(api, { id: 42, url }), { ...job, source }); assert.equal(calls, 1);
+  }
+  assert.equal(captureSource('https://indeed.com.evil.test/viewjob?jk=123'), '');
+  assert.equal(captureSource('https://smartapply.indeed.com/beta/indeedapply/form'), '');
+  assert.equal(captureSource('https://user:pass@ma.indeed.com/viewjob'), '');
+});
+
+test('popup retries loading fields but stops on verification and never injects into application forms', async () => {
+  const tab = { id: 2, url: 'https://ma.indeed.com/viewjob?jk=0000000000000001' }; let calls = 0;
+  const api = { scripting: { executeScript: async () => [{ result: ++calls < 2 ? { job: { title: 'Loading' } } : { job: { title: 'Junior', company: 'Fixture', description: 'Python' } } }] } };
+  assert.equal((await captureJob(api, tab, async () => {})).company, 'Fixture'); assert.equal(calls, 2);
+  api.scripting.executeScript = async () => [{ result: { blocked: true } }];
+  await assert.rejects(captureJob(api, tab), /verification or sign-in/);
+  api.scripting.executeScript = async () => { throw Error('must not inject'); };
+  await assert.rejects(captureJob(api, { ...tab, url: 'https://smartapply.indeed.com/beta/indeedapply/form' }), /Open a LinkedIn or Indeed job posting/);
 });

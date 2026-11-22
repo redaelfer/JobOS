@@ -47,7 +47,7 @@ test('local source parsing excludes generic employer pages and preserves unknown
   assert.equal(result.jobs.length, 1); assert.equal(result.jobs[0].discoveryBucket, 'undated-review'); assert.equal(result.jobs[0].postedAt, ''); assert.equal(result.jobs[0].availabilityStatus, 'unconfirmed');
 });
 
-test('Ollama hosted-search 429 is cached across both sites and contact research while local comparisons continue', async () => {
+test('Ollama hosted-search 429 is cached across both sites without leaking private inputs or running a comparison', async () => {
   const keys = credentialStore(null, {}); keys.save({ ollamaSearch: 'SYNTHETIC_PRIVATE_KEY' });
   let webRequests = 0, compared = 0;
   const backend = createAIBackend(updateAIConfig({}, { provider: 'ollama', searchProvider: 'ollama' }), keys, {
@@ -64,15 +64,15 @@ test('Ollama hosted-search 429 is cached across both sites and contact research 
     saveJob: job => ({ job: { ...job, id: 'saved' }, created: true }), saveCompany: () => {}
   });
   assert.equal(webRequests, 2, 'one success and one 429; no further hosted requests');
-  assert.deepEqual(result.newJobIds, ['saved']); assert.equal(compared, 1);
+  assert.deepEqual(result.newJobIds, ['saved']); assert.equal(compared, 0);
   assert.equal(result.warnings.length, 1); assert.match(result.warnings[0], /HTTP 429/);
   assert.doesNotMatch(JSON.stringify(result), /PRIVATE/);
-  assert.equal(result.sourceResults[1].status, 'failed'); assert.equal(result.companiesResearched, 0);
+  assert.equal(result.sourceResults[1].status, 'failed'); assert.equal(result.report, undefined);
 });
 
-test('CPU ranking batches process every eligible job singly while retaining the entire CV', async () => {
+test('local discovery leaves old jobs and the private CV untouched', async () => {
   const resume = 'Synthetic junior engineer with Python, SQL and software APIs.', jobs = [1, 2, 3].map(index => ({ id: String(index), title: 'Junior Software Engineer', company: 'Acme', description: 'Build Python and SQL APIs with automated tests.', url: `https://example.com/jobs/${index}`, stage: 'Saved', updatedAt: '2026-10-12' })), calls = [];
   const result = await performAutomatedScan({ settings: { resume, rankBatchSize: 1 }, knownJobs: jobs, search: async () => ({ summary: 'No new sources.', jobs: [] }), research: async () => [], rank: async input => { calls.push(input); return { summary: 'Synthetic rank', rankings: input.jobs.map(job => ({ jobId: job.id, score: 75 })) }; }, saveJob: job => ({ job }), saveCompany: () => {} });
-  assert.equal(calls.length, 3); assert.ok(calls.every(input => input.jobs.length === 1 && input.resume === resume));
-  assert.equal(result.rankedJobs.length, 3); assert.equal(result.pendingRankings, 0);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(result.newJobIds, []);
 });

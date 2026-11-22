@@ -1,7 +1,11 @@
 import http from 'node:http';
+import { indeedBrowser, indeedNavigation } from './lib/indeed-browser.js';
+import { indeedScope } from './lib/indeed-policy.js';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { resolve, extname, dirname, join } from 'node:path';
+import { employerInbox, preservePostingContacts } from './lib/employer-inbox.js';
+import { offerLanguage } from './public/offer-language.js';
 import { openStore } from './lib/store.js';
 import { setupLocalSearch, ensureLocalSearch } from './lib/local-search.js';
 import { clean, validateJob, matchJob, jobUrl } from './lib/domain.js';
@@ -33,6 +37,9 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
   const cv = cvWorkspace(cvPath, artifactRoot, latexCompiler);
   let polling = false, mailbox = { configured: mailboxConfigured(), lastCheck: null, error: null };
   let activeRun = false;
+  const employers = employerInbox(store, backend, () => activeRun || indeed.active());
+  const indeed = indeedBrowser(store, { saveJob: (job, runId) => { const result = ingest(job); if (result.created) employers.enqueue(result.job, runId); return result; }, isExcluded: job => isExcluded(job), busy: () => activeRun || availabilityReport(store)?.status === 'running', changed: () => employers.schedule() });
+  const workflowBusy = () => activeRun || indeed.active();
   const postingId = url => createHash('sha256').update(jobUrl(url)).digest('hex');
   const dismissedUrls = () => store.list('dismissedJobs').map(record => record.url);
   const isDismissed = job => { const url = typeof job === 'string' ? job : job?.url; return !!url && (!!store.get('dismissedJobs', postingId(url)) || store.list('dismissedJobs').some(record => jobUrl(record.url) === jobUrl(url))); };
@@ -40,12 +47,12 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
   // from permanent deletion records. Late provider results consult the same set.
   let excludedCache;
   function excludedPostings() {
-    return excludedCache ??= new Set([...dismissedUrls(), ...store.list('jobs').filter(j => j.stage === 'Closed').map(j => j.url)].filter(Boolean).map(jobUrl));
+    return excludedCache ??= new Set([...dismissedUrls(), ...store.list('jobs').filter(j => j.expiredAt || j.stage === 'Closed').map(j => j.url)].filter(Boolean).map(jobUrl));
   }
-  const isExcluded = job => job.stage === 'Closed' || (!!job.url && excludedPostings().has(jobUrl(job.url)));
+  const isExcluded = job => !!job.expiredAt || job.stage === 'Closed' || (!!job.url && excludedPostings().has(jobUrl(job.url)));
   function updateAlert(job) {
     const settings = store.get('settings', 'main');
-    if (job.stage === 'Closed' || outsideEntryLevel(job, settings.searchLevel)) return;
+    if (job.expiredAt || job.stage === 'Closed' || outsideEntryLevel(job, settings.searchLevel)) return;
     const existing = store.list('alerts').find(a => a.jobId === job.id);
     const match = matchJob(job, settings);
     if (existing) store.put('alerts', { ...existing, title: job.title, company: job.company });
@@ -53,10 +60,12 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
   }
   function ingest(input) {
     const metadata = Object.fromEntries(['verification', 'evidence', 'postedAt', 'sourceCheckedAt', 'discoveryBucket', 'availabilityStatus', 'availabilityEvidence', 'discoveryProvider', 'discoveryModel'].filter(key => key in input).map(key => [key, clean(input[key], key === 'evidence' ? 2000 : 300)]));
+    if (input.postingUrl && jobUrl(input.postingUrl) === jobUrl(input.url)) metadata.postingUrl = indeedNavigation(input.postingUrl);
     const job = { ...validateJob(input), ...metadata };
     if (isDismissed(job)) return { job: null, created: false, skipped: true, reason: 'You previously deleted this posting. It will not be added again.' };
     const existing = job.url && store.list('jobs').find(j => j.url && jobUrl(j.url) === job.url);
     if (existing) {
+      if (existing.expiredAt) return { job: existing, created: false, skipped: true, reason: 'This posting is in your Expired archive.' };
       if (existing.stage === 'Closed') return { job: existing, created: false, skipped: true, reason: 'You closed this posting. Reopen it in Applications to see it again.' };
       if (input.descriptionVerified || (['LinkedIn email', 'Codex LinkedIn search', 'Codex employer search', 'AI LinkedIn search', 'AI employer search'].includes(existing.source) && job.source === 'LinkedIn extension') || (['Codex LinkedIn search', 'Codex employer search', 'AI LinkedIn search', 'AI employer search', 'Codex Indeed search', 'AI Indeed search'].includes(existing.source) && ['Codex LinkedIn search', 'Codex employer search', 'AI LinkedIn search', 'AI employer search', 'Codex Indeed search', 'AI Indeed search'].includes(job.source) && !existing.description && job.description)) {
         const enriched = store.put('jobs', { ...existing, ...metadata, title: job.title, company: job.company, location: job.location || existing.location, description: job.description || existing.description, lastSeenAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
@@ -73,7 +82,7 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
     updateAlert(created);
     return { job: created, created: true };
   }
-  const opportunities = () => buildOpportunities({ jobs: store.list('jobs'), rankings: store.list('rankings'), companies: store.list('companies'), contacts: store.list('contacts'), settings: store.get('settings', 'main') });
+  const opportunities = () => buildOpportunities({ jobs: store.list('jobs'), rankings: store.list('rankings'), pendingEmployers: store.list('employerQueue').filter(t => t.status === 'pending').map(t => t.name), companies: store.list('companies'), contacts: store.list('contacts'), settings: store.get('settings', 'main') });
   async function checkMail() {
     if (polling) return { busy: true };
     polling = true;
@@ -90,10 +99,10 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
       const local = !origin || allowedHosts.some(h => origin === `http://${h}`);
       const extension = /^chrome-extension:\/\/[a-p]{32}$/.test(origin || '');
       if (!local && !extension) return send(403, { error: 'Origin not allowed.' });
-      if (extension) { res.setHeader('Access-Control-Allow-Origin', origin); res.setHeader('Vary', 'Origin'); res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-JobOS-Token, X-JobOS-Review'); res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS'); }
+      if (extension) { res.setHeader('Access-Control-Allow-Origin', origin); res.setHeader('Vary', 'Origin'); res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-JobOS-Token, X-JobOS-Review, X-JobOS-Search'); res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS'); }
       const url = new URL(req.url, `http://${req.headers.host}`), path = url.pathname;
       if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
-      if (extension && !['/api/capture', '/api/availability-check/browser'].includes(path)) return send(403, { error: 'Extension access is limited to capture and posting reviews.' });
+      if (extension && !['/api/capture', '/api/availability-check/browser', '/api/indeed/browser'].includes(path)) return send(403, { error: 'Extension access is limited to capture and posting reviews.' });
       let body = {};
       if (['POST', 'PUT', 'PATCH'].includes(req.method)) {
         if (!req.headers['content-type']?.startsWith('application/json')) return send(415, { error: 'JSON required.' });
@@ -101,23 +110,26 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
         try { body = JSON.parse(raw || '{}'); } catch { return send(400, { error: 'Invalid JSON.' }); }
         if (!body || Array.isArray(body) || typeof body !== 'object') return send(400, { error: 'JSON object required.' });
       }
+      if (path === '/api/indeed/browser' && req.method === 'POST') return send(200, indeed.step(req.headers['x-jobos-search'], body));
       if (path === '/api/availability-check/browser' && req.method === 'POST') return send(200, browserReviewStep(store, req.headers['x-jobos-review'], body));
-      if (path === '/api/availability-check/close' && req.method === 'POST') {
+      if (['/api/availability-check/expire', '/api/availability-check/close'].includes(path) && req.method === 'POST') {
         if (req.headers['x-jobos-token'] !== store.get('settings', 'main').token) return send(401, { error: 'JobOS token required to close offers.' });
-        const result = closeUnavailableJobs(store, body);
-        if (result.closed) excludedCache = undefined;
+        const result = closeUnavailableJobs(store, body, path.endsWith('/expire'));
+        if (result.expired || result.closed) excludedCache = undefined;
         return send(200, result);
       }
       if (path === '/api/availability-check' && req.method === 'POST') {
         if (req.headers['x-jobos-token'] !== store.get('settings', 'main').token) return send(401, { error: 'JobOS token required to check saved offers.' });
+        if (indeed.active()) return send(409, { error: 'Pause Indeed before starting a posting review.' });
         if (body.mode === 'browser') return send(202, startBrowserReview(store));
         return send(202, startAvailabilityCheck(store, availabilityFetcher));
       }
       if (path === '/api/state' && req.method === 'GET') {
+        indeed.pending(); // Detect a disconnected controller and release its workflow lock.
         const jobs = store.list('jobs');
         const level = store.get('settings', 'main').searchLevel;
-        const hiddenAlertIds = new Set(jobs.filter(j => j.stage === 'Closed' || outsideEntryLevel(j, level)).map(j => j.id));
-        return send(200, { availabilityCheck: availabilityReport(store), ai: aiSnapshot(), modelDownloads: store.list('modelDownloads').slice(0, 1), jobs, dismissedJobUrls: dismissedUrls(), contacts: store.list('contacts'), reminders: store.list('reminders'), alerts: store.list('alerts').filter(a => !hiddenAlertIds.has(a.jobId)), settings: store.get('settings', 'main'), mailbox, rankings: store.list('rankings').slice(0, 10), searches: store.list('searches').slice(0, 5), companies: store.list('companies'), scans: store.list('scans').slice(0, 10), opportunities: opportunities(), tailorings: store.list('tailorings').slice(0, 20).map(({ latex, email, changes, questions, analysis, ...run }) => run) });
+        const hiddenAlertIds = new Set(jobs.filter(j => j.expiredAt || j.stage === 'Closed' || outsideEntryLevel(j, level)).map(j => j.id));
+        return send(200, { availabilityCheck: availabilityReport(store), employerLookupsPending: store.list('employerQueue').filter(t => t.status === 'pending').length, ai: aiSnapshot(), modelDownloads: store.list('modelDownloads').slice(0, 1), jobs, dismissedJobUrls: dismissedUrls(), contacts: store.list('contacts'), reminders: store.list('reminders'), alerts: store.list('alerts').filter(a => !hiddenAlertIds.has(a.jobId)), settings: store.get('settings', 'main'), mailbox, rankings: store.list('rankings').slice(0, 10), searches: store.list('searches').slice(0, 5), companies: store.list('companies'), scans: store.list('scans').slice(0, 10), opportunities: opportunities(), tailorings: store.list('tailorings').slice(0, 20).map(({ latex, email, changes, questions, analysis, ...run }) => run) });
       }
       if (path === '/api/opportunities' && req.method === 'GET') {
         const feed = opportunities();
@@ -132,7 +144,7 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
         if (req.headers['x-jobos-token'] !== store.get('settings', 'main').token) return send(401, { error: 'JobOS token required for AI settings.' });
         if (path === '/api/ai/config' && req.method === 'GET') return send(200, aiSnapshot());
         if (path === '/api/ai/config' && req.method === 'PUT') {
-          if (activeRun) return send(409, { error: 'Wait for the current AI workflow or model download before changing providers.' });
+          if (workflowBusy()) return send(409, { error: 'Wait for the current AI workflow or model download before changing providers.' });
           if ((origin && !body.expectedRevision) || ('expectedRevision' in body && body.expectedRevision !== aiSnapshot().revision)) return send(409, { error: 'AI settings changed or this page is outdated. Reload saved settings in AI models before saving.' });
           const settings = store.get('settings', 'main'), config = updateAIConfig(settings.ai, body);
           credentials.save(body.keys, body.clearKeys); store.put('settings', { ...settings, ai: config });
@@ -143,7 +155,7 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
         const downloadId = path.match(/^\/api\/ai\/local\/download\/([^/]+)$/)?.[1];
         if (downloadId && req.method === 'GET') { const run = store.get('modelDownloads', downloadId); return send(run ? 200 : 404, run || { error: 'Download not found.' }); }
         if (path === '/api/ai/local/select' && req.method === 'POST') {
-          if (activeRun) return send(409, { error: 'Wait for the current workflow or download before selecting a model.' });
+          if (workflowBusy()) return send(409, { error: 'Wait for the current workflow or download before selecting a model.' });
           const model = validateModel(body.model);
           if ('expectedRevision' in body && body.expectedRevision !== aiSnapshot().revision) return send(409, { error: 'AI settings changed. Reload saved settings before selecting a model.' });
           activeRun = true;
@@ -153,23 +165,23 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
             const settings = store.get('settings', 'main');
             store.put('settings', { ...settings, ai: updateAIConfig(settings.ai, { provider: 'ollama', model, baseUrl: 'http://127.0.0.1:11434' }) });
             return send(200, aiSnapshot());
-          } finally { activeRun = false; }
+          } finally { activeRun = false; employers.schedule(); }
         }
         if (path === '/api/ai/search/local/setup' && req.method === 'POST') {
-          if (activeRun) return send(409, { error: 'Wait for the current AI workflow or setup to finish.' });
+          if (workflowBusy()) return send(409, { error: 'Wait for the current AI workflow or setup to finish.' });
           activeRun = true;
           let run = store.put('modelDownloads', { status: 'running', tool: 'searxng', model: 'SearXNG', phase: 'Preparing local web search', createdAt: new Date().toISOString() });
-          Promise.resolve().then(() => searchSetup(phase => { run = store.put('modelDownloads', { ...run, phase }); })).then(() => store.put('modelDownloads', { ...run, status: 'completed', phase: 'Local SearXNG is ready. Select Local model + local search, then Test live search.', completedAt: new Date().toISOString() })).catch(error => store.put('modelDownloads', { ...run, status: 'failed', error: /Start Docker Desktop/.test(error.message) ? 'Start Docker Desktop, then retry Install / start local search in AI models.' : 'Local search setup could not finish. Check Docker Desktop, port 8888 and LOCAL-SETUP.md.', completedAt: new Date().toISOString() })).finally(() => { activeRun = false; });
+          Promise.resolve().then(() => searchSetup(phase => { run = store.put('modelDownloads', { ...run, phase }); })).then(() => store.put('modelDownloads', { ...run, status: 'completed', phase: 'Local SearXNG is ready. Select Local model + local search, then Test live search.', completedAt: new Date().toISOString() })).catch(error => store.put('modelDownloads', { ...run, status: 'failed', error: /Start Docker Desktop/.test(error.message) ? 'Start Docker Desktop, then retry Install / start local search in AI models.' : 'Local search setup could not finish. Check Docker Desktop, port 8888 and LOCAL-SETUP.md.', completedAt: new Date().toISOString() })).finally(() => { activeRun = false; employers.schedule(); });
           return send(202, { id: run.id, status: run.status });
         }
         if (['/api/ai/test', '/api/ai/search-test'].includes(path) && req.method === 'POST') {
-          if (activeRun) return send(409, { error: 'Wait for the current AI workflow before testing a model.' });
+          if (workflowBusy()) return send(409, { error: 'Wait for the current AI workflow before testing a model.' });
           if ('expectedRevision' in body && body.expectedRevision !== aiSnapshot().revision) return send(409, { error: 'AI settings changed. Reload saved settings in AI models before testing.' });
           activeRun = true;
-          try { return send(200, path === '/api/ai/search-test' ? await backend().testSearch() : await backend().status('rank', true)); } finally { activeRun = false; }
+          try { return send(200, path === '/api/ai/search-test' ? await backend().testSearch() : await backend().status('rank', true)); } finally { activeRun = false; employers.schedule(); }
         }
         if (path === '/api/ai/local/setup' && req.method === 'POST') {
-          if (activeRun) return send(409, { error: 'An AI workflow or model download is already running.' });
+          if (workflowBusy()) return send(409, { error: 'An AI workflow or model download is already running.' });
           if ('expectedRevision' in body && body.expectedRevision !== aiSnapshot().revision) return send(409, { error: 'AI settings changed. Reload saved settings before downloading.' });
           const profile = aiSnapshot().profiles.ollama;
           const model = validateModel(body.model ?? profile.model);
@@ -177,7 +189,7 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
           if (body.model === undefined && profile.baseUrl !== 'http://127.0.0.1:11434') throw new Error('Portable setup uses http://127.0.0.1:11434. Set that local address first.');
           activeRun = true;
           let run = store.put('modelDownloads', { status: 'running', phase: 'Preparing local Ollama', model, createdAt: new Date().toISOString() });
-          Promise.resolve().then(() => localSetup(model, phase => { run = store.put('modelDownloads', { ...run, phase }); })).then(() => store.put('modelDownloads', { ...run, status: 'completed', phase: 'Download complete. Refresh installed models, click Use this model, then Test saved model.', completedAt: new Date().toISOString() })).catch(() => store.put('modelDownloads', { ...run, status: 'failed', completedAt: new Date().toISOString(), error: 'Local setup could not finish. Check available disk space/network, install Ollama from its official site if needed, then retry.' })).finally(() => { activeRun = false; });
+          Promise.resolve().then(() => localSetup(model, phase => { run = store.put('modelDownloads', { ...run, phase }); })).then(() => store.put('modelDownloads', { ...run, status: 'completed', phase: 'Download complete. Refresh installed models, click Use this model, then Test saved model.', completedAt: new Date().toISOString() })).catch(() => store.put('modelDownloads', { ...run, status: 'failed', completedAt: new Date().toISOString(), error: 'Local setup could not finish. Check available disk space/network, install Ollama from its official site if needed, then retry.' })).finally(() => { activeRun = false; employers.schedule(); });
           return send(202, { id: run.id, status: run.status });
         }
         return send(404, { error: 'AI endpoint not found.' });
@@ -191,30 +203,31 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
           return send(201, await cv.save(starterLatex(store.get('settings', 'main').resume), master.hash));
         }
         if (path === '/api/codex/tailor' && req.method === 'POST') {
-          if (activeRun) return send(409, { error: 'An AI workflow or model download is already running. Wait for it to finish.' });
+          if (workflowBusy()) return send(409, { error: 'An AI workflow or model download is already running. Wait for it to finish.' });
           if (body.analysisOnly !== undefined && typeof body.analysisOnly !== 'boolean') throw new Error('Choose whether to analyze the offer or generate a draft.');
           if (body.analysisId !== undefined && (typeof body.analysisId !== 'string' || body.analysisId.length > 80)) throw new Error('Invalid offer analysis reference.');
           const job = store.get('jobs', body.jobId); if (!job || job.description.length < 40) throw new Error('Choose a saved opportunity with a full description.');
           const master = await cv.load(); if (!master.exists) throw new Error('Add and save your main.tex CV first.');
-          const source = validateLatex(master.source), resume = store.get('settings', 'main').resume;
+          const source = validateLatex(master.source), resume = '';
           if (source.length + resume.length + job.description.length > 160000) throw new Error('The CV and job input are too long. Shorten the master CV or job description.');
-          const language = body.language || 'English'; if (!['English', 'French'].includes(language)) throw new Error('Choose English or French.');
+          const language = body.language || offerLanguage(job); if (!['English', 'French'].includes(language)) throw new Error('Choose English or French.');
           const recipientEmail = clean(body.recipientEmail, 254), recipientName = clean(body.recipientName, 200);
           if (recipientEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipientEmail)) throw new Error('Enter a valid recipient email, or leave it blank.');
           const ai = backend(), ready = await ai.status('tailor'); if (!ready.ready) return send(503, { error: ready.message });
-          if (activeRun) return send(409, { error: 'An AI workflow is already running.' }); activeRun = true;
+          if (workflowBusy()) return send(409, { error: 'An AI workflow is already running.' }); activeRun = true;
           const analysisOnly = body.analysisOnly === true, input = { source, resume, job, language, recipientName };
           const cached = body.analysisId ? store.get('tailorings', body.analysisId) : null;
           const reusable = ['completed', 'failed'].includes(cached?.status) && cached.analysisReady && cached.analysisVersion === tailoringAnalysisVersion && cached.jobId === job.id && cached.language === language && cached.sourceHash === master.hash && cached.resumeHash === sourceHash(resume) && cached.jobUpdatedAt === job.updatedAt && cached.provider === ai.provider && cached.model === ai.model;
           let run = store.put('tailorings', { provider: ai.provider, model: ai.model, providerLabel: ai.providerLabel, mode: analysisOnly ? 'analysis' : 'draft', phase: 'Reading the offer and identifying CV/email priorities', jobId: job.id, title: job.title, company: job.company, language, recipientEmail, recipientName, templateLocked: true, sourceHash: master.hash, resumeHash: sourceHash(resume), jobUpdatedAt: job.updatedAt, createdAt: new Date().toISOString(), status: 'running' });
           Promise.resolve().then(async () => {
+            await employers.wait();
             const analysis = reusable ? cached.analysis : validateTailoringAnalysis(await ai.analyzeTailoring(input), input);
             run = store.put('tailorings', { ...run, analysis, analysisReady: true, analysisVersion: tailoringAnalysisVersion, ...(reusable ? { analysisFromId: cached.id } : {}), phase: analysisOnly ? 'Offer analysis ready to review' : 'Writing the CV and email using the offer analysis' });
             if (analysisOnly) return store.put('tailorings', { ...run, status: 'completed', completedAt: new Date().toISOString() });
             const output = await ai.tailor({ ...input, analysis });
             const result = reportCvChanges(validateTailoring(output, source), source, language); const files = await cv.savePackage(run.id, result, recipientEmail);
             store.put('tailorings', { ...run, ...result, ...files, status: 'completed', completedAt: new Date().toISOString() });
-          }).catch(error => store.put('tailorings', { ...run, status: 'failed', completedAt: new Date().toISOString(), ...tailoringFailure(error) })).finally(() => { activeRun = false; });
+          }).catch(error => store.put('tailorings', { ...run, status: 'failed', completedAt: new Date().toISOString(), ...tailoringFailure(error) })).finally(() => { activeRun = false; employers.schedule(); });
           return send(202, { id: run.id, status: run.status });
         }
         const tailoringMatch = path.match(/^\/api\/codex\/tailor\/([^/]+)(?:\/files\/([^/]+))?$/);
@@ -224,9 +237,9 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
             if (run.status !== 'completed' || !run.files?.includes(file)) return send(404, { error: 'File not found.' });
             const text = await cv.readPackageFile(id, file); res.writeHead(200, { 'Content-Type': file === 'main.pdf' ? 'application/pdf' : 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Disposition': `attachment; filename="${file}"` }); return res.end(text);
           }
-          if (!file && req.method === 'GET') return send(200, { ...run, stale: run.sourceHash !== (await cv.load()).hash || run.resumeHash !== sourceHash(store.get('settings', 'main').resume) || run.jobUpdatedAt !== store.get('jobs', run.jobId)?.updatedAt });
+          if (!file && req.method === 'GET') return send(200, { ...run, stale: run.sourceHash !== (await cv.load()).hash || run.resumeHash !== sourceHash('') || run.jobUpdatedAt !== store.get('jobs', run.jobId)?.updatedAt });
           if (!file && req.method === 'PUT') {
-            if (activeRun) return send(409, { error: 'Wait for the current AI workflow or model download to finish before updating a draft.' });
+            if (workflowBusy()) return send(409, { error: 'Wait for the current AI workflow or model download to finish before updating a draft.' });
             if (run.status !== 'completed') throw new Error('Wait for this draft to finish.');
             if (run.mode === 'analysis') throw new Error('Generate a CV and email from this analysis before editing draft files.');
             let result = validateTailoring({ ...run, latex: body.latex ?? run.latex, email: body.email ?? run.email });
@@ -237,55 +250,56 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
               const currentMaster = await cv.load();
               if (currentMaster.hash === run.sourceHash || body.confirmCurrentInputs) result = reportCvChanges(result, currentMaster.source, run.language);
               const files = await cv.savePackage(id, result, recipientEmail);
-              const reviewedInputs = body.confirmCurrentInputs === true ? { sourceHash: (await cv.load()).hash, resumeHash: sourceHash(store.get('settings', 'main').resume), jobUpdatedAt: store.get('jobs', run.jobId)?.updatedAt } : {};
+              const reviewedInputs = body.confirmCurrentInputs === true ? { sourceHash: (await cv.load()).hash, resumeHash: sourceHash(''), jobUpdatedAt: store.get('jobs', run.jobId)?.updatedAt } : {};
               const saved = store.put('tailorings', { ...run, ...result, ...files, ...reviewedInputs, recipientEmail, reviewedAt: new Date().toISOString() });
-              return send(200, { ...saved, stale: saved.sourceHash !== (await cv.load()).hash || saved.resumeHash !== sourceHash(store.get('settings', 'main').resume) || saved.jobUpdatedAt !== store.get('jobs', saved.jobId)?.updatedAt });
-            } finally { activeRun = false; }
+              return send(200, { ...saved, stale: saved.sourceHash !== (await cv.load()).hash || saved.resumeHash !== sourceHash('') || saved.jobUpdatedAt !== store.get('jobs', saved.jobId)?.updatedAt });
+            } finally { activeRun = false; employers.schedule(); }
           }
         }
         if (path === '/api/codex/status' && req.method === 'GET') return send(200, await backend().status());
+        const browserScanId = path.match(/^\/api\/codex\/scan\/([^/]+)\/browser$/)?.[1];
+        if (browserScanId && req.method === 'POST') return send(200, body.action === 'stop' ? indeed.stop(browserScanId, body) : indeed.launch(browserScanId));
         if (path === '/api/codex/scan' && req.method === 'POST') {
           const selectedSite = body.jobSite === undefined ? 'all' : body.jobSite;
           scanSites(selectedSite);
-          if (activeRun) return send(409, { error: 'An AI workflow or model download is already running. This scan will not start twice.' });
+          if (workflowBusy()) return send(409, { error: 'An AI workflow or model download is already running. This scan will not start twice.' });
+          if (indeed.pending()) return send(409, { error: 'Resume or stop the pending Indeed browser search first.' });
           const settings = store.get('settings', 'main');
-          if (settings.resume.length < 40) throw new Error('Upload your CV before starting automation.');
-          const ai = backend(), ready = await ai.status('scan'); if (!ready.ready) return send(503, { error: ready.message });
-          if (activeRun) return send(409, { error: 'An AI workflow is already running.' });
+          const browserIndeed = settings.indeedSearchMode !== 'provider' && selectedSite !== 'linkedin';
+          const providerSite = browserIndeed ? 'linkedin' : selectedSite;
+          const onlyBrowser = browserIndeed && selectedSite === 'indeed';
+          const retry = body.retryOf ? store.get('scans', body.retryOf) : null;
+          if (body.retryOf && (!retry || !retry.sourceResults?.some(s => s.jobSite === selectedSite && ['failed', 'partial', 'skipped'].includes(s.status)))) throw new Error('Select an incomplete source from a saved search.');
+          const ai = backend(), ready = onlyBrowser ? { ready: true } : await ai.status('scan'); if (!ready.ready && !browserIndeed) return send(503, { error: ready.message });
+          if (workflowBusy() || indeed.pending()) return send(409, { error: 'A search or AI workflow is already running or waiting for your browser.' });
           activeRun = true;
-          const resumeHash = createHash('sha256').update(settings.resume).digest('hex');
-          let run = store.put('scans', { searchProvider: ai.provider === 'codex' ? 'codex' : aiSnapshot().searchProvider, searchBaseUrl: aiSnapshot().searchBaseUrl, provider: ai.provider, model: ai.model, providerLabel: ai.providerLabel, jobSite: selectedSite, status: 'running', phase: selectedSite === 'all' ? 'Starting LinkedIn, company careers and Indeed search' : selectedSite === 'indeed' ? 'Starting Indeed search workflow' : 'Starting manual search workflow', createdAt: new Date().toISOString() });
+          const priorIds = retry?.newJobIds || [], priorSources = (retry?.sourceResults || []).filter(s => s.jobSite !== selectedSite);
+          let run = store.put('scans', { searchProvider: ai.provider === 'codex' ? 'codex' : aiSnapshot().searchProvider, searchBaseUrl: aiSnapshot().searchBaseUrl, provider: ai.provider, model: ai.model, providerLabel: ai.providerLabel, jobSite: selectedSite, ...(retry ? { retryOf: retry.id } : {}), newJobIds: priorIds, sourceResults: priorSources, status: 'running', phase: 'Starting discovery', createdAt: new Date().toISOString() });
           const progress = phase => { run = store.put('scans', { ...run, phase }); };
-          Promise.resolve().then(() => prepareSearch(progress)).then(() => performAutomatedScan({
-            settings: { ...settings, resumeHash, rankInputBudget: ai.inputBudget, rankBatchSize: ai.rankBatchSize }, searchSite: selectedSite, knownJobs: store.list('jobs'), ignoredUrls: [...excludedPostings()], isIgnored: isExcluded, companies: store.list('companies'), rankings: store.list('rankings'), search: ai.search, research: ai.research, rank: ai.rank, hydrate: hydrator, saveJob: ingest,
-            progress,
-            saveCompany: company => {
-              store.put('companies', { ...company, id: createHash('sha256').update(company.name.toLowerCase()).digest('hex').slice(0, 24) });
-              for (const member of company.recruitmentTeam || []) if (!store.list('contacts').some(c => c.name.toLowerCase() === member.name.toLowerCase() && c.company.toLowerCase() === company.name.toLowerCase())) store.put('contacts', { name: member.name, role: member.role, company: company.name, email: '', linkedin: member.profileUrl || '', notes: `${member.status}\nSource: ${member.sourceUrl}` });
-              for (const email of company.contacts || []) if (!store.list('contacts').some(c => c.email.toLowerCase() === email.email.toLowerCase())) store.put('contacts', { name: `Recruitment contact — ${company.name}`, role: 'Published business contact; role unverified', company: company.name, email: email.email, linkedin: '', notes: `${email.status}\nSource: ${email.sourceUrl}` });
-            }
-          })).then(result => {
-            let rankingId = '';
-            if (result.report) rankingId = store.put('rankings', { ...result.report, provider: ai.provider, model: ai.model, providerLabel: ai.providerLabel, status: 'completed', createdAt: run.createdAt, completedAt: new Date().toISOString(), jobIds: result.rankedJobs.map(j => j.id), jobUpdatedAt: Object.fromEntries(result.rankedJobs.map(j => [j.id, j.updatedAt])), resumeHash, preferencesHash: result.preferencesHash }).id;
-            const { report, rankedJobs, ...summary } = result;
-            store.put('scans', { ...run, ...summary, rankingId, status: 'completed', completedAt: new Date().toISOString() });
-          }).catch(error => store.put('scans', { ...run, status: 'failed', completedAt: new Date().toISOString(), ...(error.sourceResults ? { sourceResults: error.sourceResults } : {}), error: clean(error.message, 500) })).finally(() => { activeRun = false; });
+          const checkpoint = details => { run = store.put('scans', { ...run, ...details, newJobIds: [...new Set([...priorIds, ...(details.newJobIds || [])])], sourceResults: [...priorSources, ...(details.sourceResults || [])] }); };
+          const finish = () => { if (browserIndeed) indeed.start(run.id, settings); };
+          Promise.resolve().then(() => employers.wait()).then(() => { if (!ready.ready) throw new Error(ready.message || 'LinkedIn search connection unavailable'); return onlyBrowser ? null : prepareSearch(progress); }).then(() => onlyBrowser ? { sourceResults: [], newJobIds: [], savedJobIds: [], warnings: [], technologies: [], closedJobs: [], summary: '' } : performAutomatedScan({
+            settings, searchSite: providerSite, knownJobs: store.list('jobs'), ignoredUrls: [...excludedPostings()], isIgnored: isExcluded, search: ai.search, progress, checkpoint,
+            saveJob: job => { const result = ingest(job); if (result.created) employers.enqueue(result.job, run.id); return result; }
+          })).then(result => { checkpoint({ ...result, status: 'completed', completedAt: new Date().toISOString() }); finish(); })
+            .catch(error => { checkpoint({ status: 'failed', newJobIds: run.newJobIds, sourceResults: error.sourceResults || scanSites(providerSite).map(jobSite => ({ jobSite, status: 'failed', error: clean(error.message, 500) })), warnings: [clean(error.message, 500)], closedJobs: [], technologies: run.technologies || [], completedAt: new Date().toISOString(), error: clean(error.message, 500) }); finish(); })
+            .finally(() => { activeRun = false; employers.schedule(); });
           return send(202, { id: run.id, status: run.status });
         }
         const scanId = path.match(/^\/api\/codex\/scan\/([^/]+)$/)?.[1];
         if (scanId && req.method === 'GET') { const run = store.get('scans', scanId); return send(run ? 200 : 404, run || { error: 'Scan not found.' }); }
         if (path === '/api/codex/search' && req.method === 'POST') {
-          if (activeRun) return send(409, { error: 'An AI workflow or model download is already running. Wait for it to finish.' });
-          const preferences = { ...searchPreferences(body), knownUrls: store.list('jobs').filter(job => !isExcluded(job)).map(job => job.url).filter(Boolean), excludedUrls: [...excludedPostings()] };
+          if (workflowBusy()) return send(409, { error: 'An AI workflow or model download is already running. Wait for it to finish.' });
+          const preferences = { ...searchPreferences({ indeedOpportunityScope: store.get('settings', 'main').indeedOpportunityScope, ...body }), knownUrls: store.list('jobs').filter(job => !isExcluded(job)).map(job => job.url).filter(Boolean), excludedUrls: [...excludedPostings()] };
           const ai = backend(), ready = await ai.status('search'); if (!ready.ready) return send(503, { error: ready.message });
-          if (activeRun) return send(409, { error: 'An AI workflow is already running.' });
+          if (workflowBusy()) return send(409, { error: 'An AI workflow is already running.' });
           activeRun = true;
           store.put('settings', { ...store.get('settings', 'main'), searchDomains: preferences.domains.join(', '), searchLocation: preferences.location, searchLevel: preferences.level, searchExclude: preferences.exclude, searchMaxAgeDays: preferences.maxAgeDays, searchIncludeReview: preferences.includeReview });
           let run = store.put('searches', { provider: ai.provider, model: ai.model, providerLabel: ai.providerLabel, status: 'running', createdAt: new Date().toISOString(), preferences });
-          Promise.resolve().then(() => prepareSearch(phase => { run = store.put('searches', { ...run, phase }); })).then(() => ai.search(preferences)).then(result => {
+          Promise.resolve().then(() => employers.wait()).then(() => prepareSearch(phase => { run = store.put('searches', { ...run, phase }); })).then(() => ai.search(preferences)).then(result => {
             const jobs = result.jobs.filter(job => !isExcluded(job));
             return store.put('searches', { ...run, ...result, jobs, summary: jobs.length === result.jobs.length ? result.summary : `${jobs.length} opportunities retained after excluding closed or deleted postings.`, status: 'completed', completedAt: new Date().toISOString() });
-          }).catch(error => store.put('searches', { ...run, status: 'failed', error: clean(error.message, 500) })).finally(() => { activeRun = false; });
+          }).catch(error => store.put('searches', { ...run, status: 'failed', error: clean(error.message, 500) })).finally(() => { activeRun = false; employers.schedule(); });
           return send(202, { id: run.id, status: run.status });
         }
         const searchMatch = path.match(/^\/api\/codex\/search\/([^/]+)(\/save)?$/);
@@ -299,7 +313,7 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
           }
         }
         if (path === '/api/codex/rank' && req.method === 'POST') {
-          if (activeRun) return send(409, { error: 'An analysis is already running. Wait for it to finish.' });
+          if (workflowBusy()) return send(409, { error: 'An analysis is already running. Wait for it to finish.' });
           const resume = clean(store.get('settings', 'main').resume, 50000);
           if (resume.length < 40) throw new Error('Upload or paste your CV before ranking jobs.');
           if (!Array.isArray(body.jobIds) || !body.jobIds.length || body.jobIds.length > 10 || new Set(body.jobIds).size !== body.jobIds.length) throw new Error('Select between 1 and 10 distinct jobs.');
@@ -308,17 +322,17 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
           if (jobs.reduce((n, j) => n + j.description.length, resume.length) > 120000) throw new Error('Selected content is too long. Rank fewer jobs at once.');
           const ai = backend(), ready = await ai.status('rank'); if (!ready.ready) return send(503, { error: ready.message });
           // Re-check after the asynchronous sign-in check to prevent concurrent starts.
-          if (activeRun) return send(409, { error: 'An analysis is already running.' });
+          if (workflowBusy()) return send(409, { error: 'An analysis is already running.' });
           activeRun = true;
           const settings = store.get('settings', 'main');
           const run = store.put('rankings', { provider: ai.provider, model: ai.model, providerLabel: ai.providerLabel, status: 'running', createdAt: new Date().toISOString(), jobIds: body.jobIds, researchContacts: body.researchContacts === true, resumeHash: createHash('sha256').update(resume).digest('hex'), preferencesHash: preferenceFingerprint(settings), jobUpdatedAt: Object.fromEntries(jobs.map(j => [j.id, j.updatedAt])) });
-          Promise.resolve().then(() => ai.rank({ resume, jobs, preferences: automationPreferences(settings), researchContacts: run.researchContacts })).then(result => store.put('rankings', { ...run, status: 'completed', completedAt: new Date().toISOString(), ...result })).catch(error => store.put('rankings', { ...run, status: 'failed', error: clean(error.message, 500) })).finally(() => { activeRun = false; });
+          Promise.resolve().then(() => employers.wait()).then(() => ai.rank({ resume, jobs, preferences: automationPreferences(settings), researchContacts: run.researchContacts })).then(result => store.put('rankings', { ...run, status: 'completed', completedAt: new Date().toISOString(), ...result })).catch(error => store.put('rankings', { ...run, status: 'failed', error: clean(error.message, 500) })).finally(() => { activeRun = false; employers.schedule(); });
           return send(202, { id: run.id, status: run.status });
         }
         const runId = path.match(/^\/api\/codex\/rank\/([^/]+)$/)?.[1];
         if (runId && req.method === 'GET') { const run = store.get('rankings', runId); return send(run ? 200 : 404, run || { error: 'Analysis not found.' }); }
       }
-      if (path === '/api/export' && req.method === 'GET') { res.setHeader('Content-Disposition', 'attachment; filename=jobos-workspace.json'); const { token, ...settings } = store.get('settings', 'main'); return send(200, { version: 1, exportedAt: new Date().toISOString(), jobs: store.list('jobs'), dismissedJobs: store.list('dismissedJobs'), contacts: store.list('contacts'), reminders: store.list('reminders'), alerts: store.list('alerts'), settings }); }
+      if (path === '/api/export' && req.method === 'GET') { res.setHeader('Content-Disposition', 'attachment; filename=jobos-workspace.json'); const { token, ...settings } = store.get('settings', 'main'); return send(200, { version: 1, companies: store.list('companies'), exportedAt: new Date().toISOString(), jobs: store.list('jobs'), dismissedJobs: store.list('dismissedJobs'), contacts: store.list('contacts'), reminders: store.list('reminders'), alerts: store.list('alerts'), settings }); }
       if ((path === '/api/jobs' || path === '/api/capture') && req.method === 'POST') {
         if (path === '/api/capture' && req.headers['x-jobos-token'] !== store.get('settings', 'main').token) return send(401, { error: 'Pair the extension with the token in Settings.' });
         const result = ingest(body); return send(result.created ? 201 : 200, result);
@@ -330,6 +344,7 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
         if (req.method === 'DELETE') {
           store.db.exec('BEGIN');
           try {
+            if (kind === 'jobs') preservePostingContacts(store, existing);
             if (kind === 'jobs' && existing.url) store.put('dismissedJobs', { id: postingId(existing.url), url: jobUrl(existing.url), deletedAt: new Date().toISOString() });
             store.remove(kind, id);
             if (kind === 'jobs') for (const k of ['reminders', 'alerts']) for (const r of store.list(k)) if (r.jobId === id) store.remove(k, r.id);
@@ -343,6 +358,7 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
           if (kind === 'jobs') {
             if ('expectedUrl' in body && body.expectedUrl !== existing.url) return send(409, { error: 'The posting link changed. Check this offer again before closing it.' });
             fields = validateJob({ ...existing, ...body });
+            if (existing.expiredAt && fields.url !== existing.url) return send(409, { error: 'The original link is kept as evidence for an expired posting. Save a different opening separately.' });
             if (isDismissed(fields)) return send(409, { error: 'You previously deleted this posting. It will not be added again.' });
             if (fields.url && store.list('jobs').some(j => j.id !== id && j.url && jobUrl(j.url) === fields.url)) return send(409, { error: 'This job URL is already saved.' });
           } else if (kind === 'reminders') fields = { done: body.done === true };
@@ -361,6 +377,12 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
       }
       if (path === '/api/settings' && req.method === 'PUT') {
         const settings = store.get('settings', 'main');
+        if ('indeedOpportunityScope' in body) {
+          const scope = indeedScope(body.indeedOpportunityScope);
+          if (scope !== (settings.indeedOpportunityScope || 'preferences') && (workflowBusy() || indeed.pending())) return send(409, { error: 'Finish or stop the current search before changing the Indeed opportunity scope.' });
+          settings.indeedOpportunityScope = scope;
+        }
+        if ('indeedSearchMode' in body) { if (!['browser', 'provider'].includes(body.indeedSearchMode)) throw new Error('Choose browser or configured provider for Indeed.'); if (indeed.pending()) return send(409, { error: 'Finish or stop the Indeed browser search before changing its mode.' }); settings.indeedSearchMode = body.indeedSearchMode; }
         if ('searchDomains' in body || 'searchMaxAgeDays' in body || 'searchIncludeReview' in body) {
           const preferences = searchPreferences({ domains: body.searchDomains ?? settings.searchDomains, location: body.searchLocation, level: body.searchLevel, exclude: body.searchExclude, maxAgeDays: body.searchMaxAgeDays ?? settings.searchMaxAgeDays, includeReview: body.searchIncludeReview ?? settings.searchIncludeReview });
           settings.searchMaxAgeDays = preferences.maxAgeDays;
@@ -382,13 +404,16 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
       if (path === '/api/check-mail' && req.method === 'POST') { try { return send(200, await checkMail()); } catch (e) { return send(400, { error: e.message }); } }
       if (path.startsWith('/api/')) return send(404, { error: 'Route not found.' });
       if (req.method !== 'GET') return send(405, { error: 'Method not allowed.' });
-      const files = { '/': 'index.html', '/help-view.js': 'help-view.js', '/user-guide.md': '../USER-GUIDE.md', '/freellmapi-guide.md': '../FREELLMAPI.md', '/app.js': 'app.js', '/style.css': 'style.css', '/domain.js': '../lib/domain.js', '/job-sites.js': '../lib/job-sites.js', '/search-warnings.js': '../lib/search-warnings.js', '/opportunities-view.js': 'opportunities-view.js', '/application-tools.js': 'application-tools.js', '/tailoring-view.js': 'tailoring-view.js', '/job-order.js': 'job-order.js', '/ai-settings-view.js': 'ai-settings-view.js' };
+      const files = { '/': 'index.html', '/offer-language.js': 'offer-language.js', '/help-view.js': 'help-view.js', '/user-guide.md': '../USER-GUIDE.md', '/freellmapi-guide.md': '../FREELLMAPI.md', '/app.js': 'app.js', '/style.css': 'style.css', '/domain.js': '../lib/domain.js', '/job-sites.js': '../lib/job-sites.js', '/search-warnings.js': '../lib/search-warnings.js', '/opportunities-view.js': 'opportunities-view.js', '/application-tools.js': 'application-tools.js', '/tailoring-view.js': 'tailoring-view.js', '/job-order.js': 'job-order.js', '/ai-settings-view.js': 'ai-settings-view.js' };
       if (!files[path]) return send(404, { error: 'File not found.' });
       const content = await readFile(resolve(root, files[path]));
       res.writeHead(200, { 'Content-Type': ({ '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css', '.md': 'text/plain; charset=utf-8' })[extname(files[path])], 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'" }); res.end(content);
     } catch (e) { send(e.status || 400, { error: e.message || 'Request failed.' }); }
   });
+  server.once('close', () => employers.stop());
   server.once('listening', () => {
+    indeed.restart();
+    employers.schedule();
     for (const kind of ['rankings', 'searches', 'scans', 'tailorings', 'modelDownloads', 'availabilityChecks']) for (const run of store.list(kind)) if (run.status === 'running') store.put(kind, { ...run, status: kind === 'availabilityChecks' && run.mode === 'browser' ? 'paused' : 'failed', error: 'The server restarted during this workflow. Please retry.' });
   });
   return { server, store, ingest, checkMail };

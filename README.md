@@ -10,22 +10,15 @@ A local, single-user job-search workspace. Built with Node.js 24, SQLite, and a 
 
 For generation without hosted AI quotas, download Qwen3 in **AI models**, then choose **Use local model + public search**. This uses local Ollama and public LinkedIn/web sources without an API key. Computer resources and website access still limit it. [LOCAL-SETUP.md](LOCAL-SETUP.md) includes automatic setup, restart/resume steps and a manual fallback.
 
-The primary workflow is junior software job discovery → published HR contacts → a CV and email for each opportunity. See [JOBOS.md](JOBOS.md) for the product goal and usage guide. Applications opens in list view with a direct posting link and tailoring action in every row. Applications opens with **Publication → All saved**, **Sort → Recently detected** and **Stage → Saved**. Daily opportunities opens with the recent publication window and latest publication dates first.
-
 ## Start using it
 
-1. Start the server and open the local URL below.
-2. Install and pair the Chrome extension using Settings, then capture real job offers with full descriptions.
-3. Open **AI models**, select a provider/model, supply its key if required, then **Save AI settings** and **Test saved model**. For local operation, use **Download model** to install Ollama with Qwen3 4B. Fresh searches with alternative providers also need a configured live search service; check it separately with **Test live search**. On a quota error, use the linked quota page or explicitly configure another search service with its own key. **Reload saved settings** refreshes an outdated form.
-4. Open **CV & AI ranking** and upload your PDF, DOCX, or TXT CV (up to 2 MB). Review the extracted text. If you chose Codex, sign in with `codex login` when needed.
-5. Select up to 10 jobs, optionally enable public recruiting-email research, then click **Send to [selected provider] & rank**.
-6. Read the ranked results, strengths, gaps, suggested next steps, and source-linked contact emails. Scores are fit estimates, not hiring probabilities. No email is sent and no job application is submitted.
+1. In **Settings → Search preferences**, save your domains, experience level, location and date window once. A new workspace starts with data science, ML, AI engineering, full-stack and data engineering; graduate/entry level; Morocco and eligible remote roles; and 30 days. Existing preferences are kept.
+2. Open **Offers** and click **Search now**. No CV is needed and searches are manual. Verified batches appear as they arrive. Choose **New in last search** to isolate what was actually added. If a source fails, retry just that source; its results join the original search. There is no result quota. Older/undated postings are marked for availability review; an unknown date is not a new publication.
+3. Read the posting, keywords and contact evidence. Published recruiting addresses appear first. Employer lookup runs separately. A general business address, a contact published for an earlier vacancy, or an unconfirmed professional profile is not a verified HR email.
+4. For a role you want, click **Tailor CV & email**. Save your accurate master `main.tex` once via **Settings → Master main.tex & drafts**. JobOS analyzes the requirements and drafts using this master, without a second CV upload. The offer language is selected by default (French/English); change it if needed. Review the separate CV and use **Copy recipient**, **Copy subject** and **Copy body**. Nothing is sent automatically.
+5. Use **Close** to skip an offer. Use **Check saved offers in browser** to find postings that explicitly stopped accepting applications. Review each notice and link, then select **Move to Expired** or **Expire all confirmed**. See archived postings with **Stage → Expired**. The archive keeps contacts, notes and drafts; jobs you already applied for also keep their application stage. A different posting from that employer can still appear.
 
-## Search now, contacts and tailored applications
-
-In Applications, **Search now** starts the full job-search workflow immediately using the provider saved in AI models. It uses your current saved CV, domains and posting window; the hourly schedule is disabled. Searches run only when you ask or click the button. Recent offers use source-confirmed publication dates within the last 30 days by default. With **Broader coverage** enabled, a second pass checks readable older or undated roles and retains them with availability warnings. One AI workflow or local-model download runs at a time. Detected email/profile contacts appear on board cards, in the list and in each opportunity's details, with source evidence in the details.
-
-There is one **Search now** button: it searches LinkedIn/company career pages and then Indeed, sequentially in the same workflow. It is available in Applications, Daily opportunities and Search history & employers. **Job search** saves your edited preferences and starts the same combined scan. Combined results are deduplicated before contacts and CV comparisons run once; if one source fails, the other source's results survive with a warning. Indeed regional/tracking URLs are deduplicated by posting key, including deleted records. No Indeed account or app installation is needed. The selected public/search-API source must return readable postings; blocked pages or verification challenges are skipped with coverage warnings. Search APIs have their own quotas and cannot guarantee that Indeed descriptions are accessible. The Chrome capture extension still targets LinkedIn. See [JOBOS.md](JOBOS.md#one-search-for-linkedin-and-indeed).
+## Tailoring and local models
 
 Choose **Tailor CV & email** on a job card or open **CV & email tailoring**. Upload/paste a standalone main.tex or edit the project-root main.tex in VS Code and click Reload saved main.tex. Create from saved CV makes a starter from your uploaded CV text. Master saves keep backups under data/applications/master-backups and refuse to overwrite a file changed on disk since loading it. The private master is excluded from Git.
 
@@ -37,40 +30,19 @@ Local Ollama requests up to eight concise edits to selected descriptive text and
 
 When a LaTeX compiler is available, main.pdf is built and offered for download. Windows MiKTeX under LOCALAPPDATA is detected automatically; TEX_BIN can specify an executable. PDF builds run without shell execution or automatic package installation. Unavailable/failed builds retain the .tex and email and show the limitation. Standalone source cannot include external files/images or executable TeX commands; ordinary distribution packages must already be installed. Codex's built-in LaTeX editor can also open the .tex for preview.
 
-Save reviewed draft regenerates files/PDF and confirms you checked the draft against the current master, CV text and job. Copy email or Open in mail app uses your edited subject/body. Attach the reviewed CV/PDF yourself; JobOS never sends the email. Update CV & AI ranking separately when changing the experience used for job scoring.
+Save reviewed draft regenerates files/PDF and confirms you checked the draft against the current master, CV text and job. Copy recipient, subject and body separately, or Open in mail app uses your edited subject/body. Attach the reviewed CV/PDF yourself; JobOS never sends the email. Update CV & AI ranking separately when changing the experience used for job scoring.
 
-## Your daily opportunities
+## Offers and contacts
 
-Upload and review your CV once in **CV & AI ranking**, then save your domains, location, experience level and exclusions in **Job search**. These preferences persist locally and are read for each requested search. **Posted within** supports the last 24 hours, 7 days, 14 days or 30 days as the primary recent window; no result-count quota is imposed. **Broader coverage** is enabled by default and adds a separate pass for older or undated postings requiring availability review. Open **Daily opportunities** for each job's score, required technologies, evidence of fit, gaps, and contact options on one card. Filter today, the last seven days or all saved jobs, and search by company, role or technology. Dates use Africa/Casablanca.
+The Offers inbox shows posting links, publication dates, technology tags, contacts and a one-click Close. **Company contacts** remains available even when no roles are active. Manual CV ranking and historical scores are optional under **More**.
 
-Strong matches default to 70/100; change the threshold on the daily page. The selected model estimates fit using demonstrated skills (50%), relevant experience (30%) and requirements (20%). Explicit location, level and exclusion conflicts reduce suitability. Scores are explained estimates, not hiring probabilities. CV, preference or job-detail changes mark scores for refresh. Missing descriptions stay pending rather than receiving invented scores. Job cards use all stored score history. Changing providers applies to future requested workflows, without automatically reranking historical results.
+## Indeed through Chrome
 
-Contact research checks published recruitment emails, then public HR names/profiles when no email is available, with confirmed employer career pages as a fallback. General business contacts are labeled with an unconfirmed HR role; unrelated merchandise/support/marketing addresses are omitted from the daily feed. Unknown people and addresses remain unknown. Clicking an email opens your mail application; JobOS does not send messages.
-
-A requested scan accepts all qualifying jobs it finds, without a 5/15/20-result cap. It researches employers in batches of six and ranks readable jobs in batches of up to ten within the selected model's input budget, processing every batch in the same scan. Hosted providers use a 120,000-character budget; Ollama uses a smaller budget based on the saved context setting and rejects oversized input instead of truncating the CV. Failed batches or unreadable descriptions remain explicitly pending. Source refresh currently checks up to three incomplete saved postings; it does not limit newly discovered results. Searches favor new URLs and include readable structured employer job-detail pages alongside public LinkedIn postings. Research also covers previously saved employers, with seven-day cache for a recruitment route and one-day retry for general-only or empty results. Older research is refreshed to apply current checks.
-
-This is manual discovery. Time and source access limit coverage; it is not an exhaustive index or a real-time subscription. Hidden/unreadable descriptions may still need Chrome capture or pasted text. LinkedIn's authenticated Chrome session is not used by the search.
+Search now checks LinkedIn/company careers first, then Indeed using JobOS extension **0.4+** in Chrome. Reload the unpacked extension, refresh JobOS in Chrome, and allow Indeed site access on first use. Keep its controller tab open. Verification or unreadable pages pause the run; handle verification yourself and Resume, or Skip that page. Stopping preserves all saved offers. The browser cursor survives a server restart; no CV, cookies or account credentials are sent to the local discovery endpoint. See [USER-GUIDE.md](USER-GUIDE.md) for setup and the optional server-provider mode.
 
 ## Manual search and history
 
-The prior hourly schedule is disabled. Ask Codex to search or click **Search now** when you want new results. Save professional domains and the **Posted within** window in **Job search**. Default targets cover junior software, backend, frontend, full-stack, AI, data, DevOps and QA in Morocco and eligible remote roles.
-
-**Search history & employers** shows requested workflow progress, source-confirmed recent opportunities, required technologies, company industries/websites and recruiting contacts. New jobs go into Applications, CV comparisons into CV & Codex ranking, and public contacts into People. All previously saved offers remain in Applications. Daily opportunities defaults to recent publication dates; use the visible **Also worth checking** buttons for older and undated roles, or **Publication → All saved** for the full history. These records are not guaranteed to remain open. A readable page, Apply button or future application deadline alone is not proof of active hiring.
-
-No timer launches job searches. The saved Codex task is paused, and the old hourly launcher exits without searching. The manual workflow can start JobOS if necessary and uses the saved AI provider. Codex uses its existing CLI sign-in; alternative providers use their own API keys or local server and never silently fall back to Codex. Hosted generation/search services have their own usage limits. Source access and runtime limits still prevent guaranteed exhaustive coverage.
-
-To run one scan manually:
-
-```powershell
-cd "C:\Users\ROG\Pictures\ensias\project\JOB"
-node scripts/run-search.js
-```
-
-Searches use public LinkedIn, Indeed and readable employer postings through web search, not the authenticated Chrome session. Public descriptions are extracted directly when accessible; unavailable descriptions require Chrome capture or pasted text before ranking. Recruiting names and roles require accessible source evidence; published business emails are never guessed and deliverability is unverified. Company industry/website research is labeled for review. No outreach is sent.
-
-After extension updates, open `chrome://extensions` and click **Reload** on JobOS, refresh the LinkedIn job page, then capture again. Version 0.2.0 supports semantic headings in newer layouts, skips global notification headings, retries during loading, and shows missing-field messages above the form.
-
-Codex integration uses a separate official CLI run, not an API into the current chat. For endpoint details and data handling, see [API.md](API.md). Run JobOS from a normal signed-in terminal so the process can access Codex authentication.
+**More → Search history & employers** retains earlier reports. A partial search does not erase offers already saved. Search and local setup details are in [JOBOS.md](JOBOS.md).
 
 ## Start
 

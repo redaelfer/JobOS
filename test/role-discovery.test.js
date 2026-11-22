@@ -54,5 +54,5 @@ test('closing one posting preserves another same-title opportunity from the same
     }, saveJob:j=>({created:true,job:j}), research:async()=>[], saveCompany:()=>{},
     rank:async({jobs})=>({summary:'Compared',rankings:jobs.map(j=>({jobId:j.id,score:40}))})
   });
-  assert.deepEqual(result.newJobIds,['fresh']); assert.deepEqual(result.report.rankings,[{jobId:'fresh',score:40}]);
+  assert.deepEqual(result.newJobIds,['fresh']); assert.equal(result.report, undefined);
 });

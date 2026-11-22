@@ -8,13 +8,33 @@ import { join } from 'node:path';
 import { createApp } from '../server.js';
 import { openStore } from '../lib/store.js';
 import { createHash } from 'node:crypto';
+async function waitState(request, predicate) {
+  for (let i = 0; i < 150; i++) { const state = (await request('/api/state')).body; if (predicate(state)) return state; await new Promise(r => setTimeout(r, 10)); } assert.fail('Background work did not finish');
+}
 async function setup(t, options = {}) {
   const app = createApp({ dbPath: ':memory:', hydrator: async () => [], ...options }); app.server.listen(0, '127.0.0.1'); await once(app.server, 'listening');
+  // These tests exercise the configured-provider path. Browser discovery has its own integration suite.
+  app.store.put('settings', { ...app.store.get('settings', 'main'), indeedSearchMode: 'provider' });
   const base = `http://127.0.0.1:${app.server.address().port}`;
   t.after(async () => { await new Promise(resolve => app.server.close(resolve)); app.store.db.close(); });
   const request = async (path, method = 'GET', body, headers = {}) => { const res = await fetch(`${base}${path}`, { method, headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined }); return { status: res.status, body: await res.json() }; };
   return { ...app, base, request };
 }
+test('Indeed scope settings validate, persist and cannot change during a pending browser search', async t => {
+  const { request, store, ingest } = await setup(t);
+  const token = { 'X-JobOS-Token': store.get('settings', 'main').token };
+  ingest({ title: 'Senior Data Engineer', company: 'Preserved', stage: 'Saved', notes: 'Keep', url: 'https://ma.indeed.com/viewjob?jk=0123456789abcdef' });
+  const jobs = store.list('jobs');
+  assert.equal((await request('/api/settings', 'PUT', { indeedOpportunityScope: 'unsupported' }, token)).status, 400);
+  assert.equal((await request('/api/settings', 'PUT', { indeedOpportunityScope: 'morocco-junior-remote' }, token)).status, 200);
+  assert.equal((await request('/api/state')).body.settings.indeedOpportunityScope, 'morocco-junior-remote');
+  assert.deepEqual(store.list('jobs'), jobs);
+  assert.equal(store.list('scans').length, 0);
+  store.put('indeedBrowserRuns', { id: 'pending', status: 'paused' });
+  assert.equal((await request('/api/settings', 'PUT', { indeedOpportunityScope: 'preferences' }, token)).status, 409);
+  assert.equal(store.get('settings', 'main').indeedOpportunityScope, 'morocco-junior-remote');
+});
+
 test('availability review checks each current posting once, persists progress and closes only on user action', async t => {
   let release;
   const pending = new Promise(resolve => { release = resolve; });
@@ -244,7 +264,7 @@ test('deleting an offer during a pending scan prevents late results from recreat
   await request(`/api/jobs/${saved.id}`, 'DELETE');
   finish({ summary: 'Late public result', jobs: [role] });
   const state = (await request('/api/state')).body;
-  assert.equal(state.scans[0].status, 'completed'); assert.equal(state.scans[0].newJobIds.length, 0); assert.equal(state.scans[0].pendingRankings, 0); assert.deepEqual(state.scans[0].warnings, []);
+  assert.equal(state.scans[0].status, 'completed'); assert.equal(state.scans[0].newJobIds.length, 0); assert.equal(state.rankings.length, 0); assert.deepEqual(state.scans[0].warnings, []);
   assert.equal(state.jobs.length, 0); assert.equal(state.rankings.length, 0); assert.equal(state.opportunities.items.length, 0);
 });
 
@@ -565,22 +585,22 @@ test('search and ranking share the single-run guard', async t => {
   assert.equal((await request('/api/codex/rank', 'POST', { jobIds: ['x'] }, headers)).status, 409);
   finish({ summary: 'No public results', jobs: [] }); await new Promise(resolve => setImmediate(resolve));
 });
-test('automated scan saves employers, contacts and CV ranking, then deduplicates next scan', async t => {
+test('discovery needs no CV, researches the new employer separately and never ranks', async t => {
   const { request } = await setup(t, { statusChecker: async () => ({ ready: true }), searcher: async () => ({ summary: 'Found', jobs: [{ title: 'Engineer', company: 'Acme', location: 'Morocco', description: 'Build production software with Python, SQL and Docker in an engineering team.', url: 'https://www.linkedin.com/jobs/view/901/', postedAt: '2 days ago', source: 'Codex LinkedIn search' }] }), researcher: async () => [{ name: 'Acme', industry: 'Software', website: 'https://example.com', sourceUrl: 'https://example.com/about', recruitmentTeam: [{ name: 'Recruiter', role: 'Recruiter', profileUrl: 'https://example.com/team', sourceUrl: 'https://example.com/team', status: 'Found on source' }], contacts: [{ email: 'careers@example.com', sourceUrl: 'https://example.com/careers', status: 'Found on source' }] }], ranker: async ({ jobs }) => ({ summary: 'Good fit', rankings: jobs.map(j => ({ jobId: j.id, score: 80, title: j.title, company: j.company, strengths: [], gaps: [], fit: 'Good', nextStep: 'Apply', contacts: [] })) }) });
-  await request('/api/settings', 'PUT', { resume: 'Synthetic engineer with Python and SQL skills and years of software development experience.' });
+  await request('/api/settings', 'PUT', { searchDomains: 'Software engineering' });
   const token = (await request('/api/state')).body.settings.token, headers = { 'X-JobOS-Token': token };
   assert.equal((await request('/api/codex/scan', 'POST', {})).status, 401);
   const start = await request('/api/codex/scan', 'POST', {}, headers); assert.equal(start.status, 202);
-  let state = (await request('/api/state')).body;
-  assert.equal(state.scans[0].status, 'completed'); assert.equal(state.jobs.length, 1); assert.equal(state.companies.length, 1); assert.equal(state.contacts.length, 2); assert.equal(state.rankings.length, 1);
+  let state = await waitState(request, s => s.contacts.length === 2);
+  assert.equal(state.scans[0].status, 'completed'); assert.equal(state.jobs.length, 1); assert.equal(state.companies.length, 1); assert.equal(state.contacts.length, 2); assert.equal(state.rankings.length, 0);
   assert.equal((await request('/api/codex/scan/' + start.body.id, 'GET', undefined, headers)).body.newJobIds.length, 1);
   await request('/api/codex/scan', 'POST', {}, headers); state = (await request('/api/state')).body;
-  assert.equal(state.jobs.length, 1); assert.equal(state.contacts.length, 2); assert.equal(state.rankings.length, 1);
-  assert.equal(state.opportunities.items[0].rankingStatus, 'current');
+  assert.equal(state.jobs.length, 1); assert.equal(state.contacts.length, 2); assert.equal(state.rankings.length, 0);
+  assert.equal(state.opportunities.items[0].rankingStatus, 'pending');
   await request('/api/settings', 'PUT', { searchDomains: 'AI engineering' });
-  assert.equal((await request('/api/opportunities')).body.items[0].rankingStatus, 'outdated');
+  assert.equal((await request('/api/opportunities')).body.items[0].rankingStatus, 'pending');
   await request('/api/codex/scan', 'POST', {}, headers); state = (await request('/api/state')).body;
-  assert.equal(state.rankings.length, 2); assert.equal(state.opportunities.items[0].rankingStatus, 'current');
+  assert.equal(state.rankings.length, 0); assert.equal(state.opportunities.items[0].rankingStatus, 'pending');
 });
 
 test('manual local scan waits for service startup, reports progress and rejects concurrent actions', async t => {
@@ -629,7 +649,7 @@ test('public and Codex scans do not start local search services', async t => {
   }
 });
 
-test('default scan searches LinkedIn and Indeed in one guarded workflow and compares both without duplicates', async t => {
+test('default scan searches LinkedIn and Indeed in one guarded workflow and saves both without duplicates or CV analysis', async t => {
   const calls = []; let active = 0, release, hold = true;
   const { request } = await setup(t, {
     statusChecker: async () => ({ ready: true }),
@@ -651,14 +671,14 @@ test('default scan searches LinkedIn and Indeed in one guarded workflow and comp
   let state;
   for (let tries = 0; tries < 30; tries++) { state = (await request('/api/state')).body; if (state.scans[0].status !== 'running') break; await new Promise(resolve => setImmediate(resolve)); }
   assert.deepEqual(calls, ['linkedin', 'indeed']); assert.equal(state.scans[0].jobSite, 'all'); assert.equal(state.scans[0].status, 'completed');
-  assert.equal(state.jobs.length, 2); assert.equal(state.scans[0].newJobIds.length, 2); assert.equal(state.rankings[0].rankings.length, 2); assert.equal(state.rankings.length, 1);
+  assert.equal(state.jobs.length, 2); assert.equal(state.scans[0].newJobIds.length, 2); assert.equal(state.rankings.length, 0);
   assert.deepEqual(state.settings, initial);
   await request('/api/codex/scan', 'POST', {}, headers);
   state = (await request('/api/state')).body;
-  assert.equal(state.jobs.length, 2); assert.equal(state.scans[0].newJobIds.length, 0); assert.equal(state.rankings.length, 1);
+  assert.equal(state.jobs.length, 2); assert.equal(state.scans[0].newJobIds.length, 0); assert.equal(state.rankings.length, 0);
 });
 
-test('Indeed scan reuses saved preferences, saves ranked offers/contacts and preserves closures and dismissal during late results', async t => {
+test('Indeed scan reuses saved preferences, saves offers and researches contacts and preserves closures and dismissal during late results', async t => {
   const key = i => (4000 + i).toString(16).padStart(16, '0');
   const roles = [1, 2].map(i => ({ title: 'Junior Software Engineer', company: 'Example Employer', location: 'Morocco', description: 'Develop software with Python, SQL and Docker in a junior engineering team.', url: `https://ma.indeed.com/viewjob?jk=${key(i)}&from=search`, source: 'AI Indeed search', postedAt: '1 day ago' }));
   let hold = false, release;
@@ -674,7 +694,7 @@ test('Indeed scan reuses saved preferences, saves ranked offers/contacts and pre
   const scan = await request('/api/codex/scan', 'POST', { jobSite: 'indeed' }, headers); assert.equal(scan.status, 202);
   let state = (await request('/api/state')).body;
   assert.equal(state.scans[0].jobSite, 'indeed'); assert.equal(state.scans[0].status, 'completed');
-  assert.equal(state.jobs.length, 2); assert.equal(state.rankings[0].rankings.length, 2); assert.equal(state.contacts.length, 1);
+  assert.equal(state.jobs.length, 2); assert.deepEqual(state.rankings, []); state = await waitState(request, s => s.contacts.length === 1);
   assert.deepEqual(state.settings, initial);
   const first = state.jobs[0], second = state.jobs[1];
   await request('/api/jobs/' + first.id, 'PATCH', { stage: 'Closed', notes: 'Keep my notes.' });
@@ -709,10 +729,10 @@ test('manual scan processes 25 recent roles and saves the posting window without
   for (let attempt = 0; attempt < 20; attempt++) { state = (await request('/api/state')).body; if (state.scans[0].status !== 'running') break; await new Promise(resolve => setTimeout(resolve, 5)); }
   assert.equal(state.scans[0].status, 'completed');
   assert.equal(state.jobs.length, 25); assert.equal(state.opportunities.items.length, 25);
-  assert.ok(state.opportunities.items.every(j => j.rankingStatus === 'current'));
-  assert.equal(state.opportunities.maxAgeDays, 7); assert.equal(state.opportunities.counts.pending, 0);
-  assert.equal(state.scans[0].newJobIds.length, 25); assert.equal(researchCount, 8);
-  assert.deepEqual(batchSizes, Array(25).fill(1));
+  assert.ok(state.opportunities.items.every(j => j.score === null));
+  assert.equal(state.opportunities.maxAgeDays, 7); assert.equal(state.opportunities.counts.pending, 25);
+  assert.equal(state.scans[0].newJobIds.length, 25); await waitState(request, s => s.companies.length === 8); assert.equal(researchCount, 8);
+  assert.deepEqual(batchSizes, []);
 });
 
 
@@ -735,4 +755,57 @@ test('supplemental source metadata persists and changed availability invalidates
   assert.equal((await request('/api/settings', 'PUT', { searchIncludeReview: false })).status, 200);
   assert.equal((await request('/api/state')).body.settings.searchIncludeReview, false);
   assert.equal((await request('/api/settings', 'PUT', { searchIncludeReview: 'invalid' })).status, 400);
+});
+
+test('reviewed expiry survives restart, keeps advanced stages and posting-scoped contacts without suppressing the next role', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'jobos-expiry-'));
+  t.after(() => rmSync(dir, {recursive:true, force:true}));
+  const dbPath = join(dir, 'workspace.sqlite');
+  let original;
+  await t.test('review only confirmed postings with current identities', async t => {
+    const {request,store,ingest} = await setup(t,{dbPath});
+    const add = (n,stage='Saved') => ingest({ title:'Data Engineer', company:'Employer', stage, notes:'keep notes', description:'Apply for this posting at jobs@example.org.', url:'https://www.linkedin.com/jobs/view/'+n+'/' }).job;
+    const jobs = [add(1001),add(1002,'Applied'),add(1003,'Interview'),add(1004),add(1005),add(1006,'Closed')];
+    original = jobs[0];
+    const report = store.put('availabilityChecks',{id:'latest',reviewId:'review1',status:'completed',matches:jobs.slice(0,5).map((j,i)=>({jobId:j.id,url:j.url,evidence:i===4?'Login required':'No longer accepting applications'}))});
+    await request('/api/jobs/'+jobs[3].id,'PATCH',{url:'https://www.linkedin.com/jobs/view/1011/'});
+    const body={reviewId:report.reviewId,jobIds:jobs.map(j=>j.id)}, headers={'X-JobOS-Token':store.get('settings','main').token};
+    assert.equal((await request('/api/availability-check/expire','POST',body)).status,401);
+    assert.equal((await request('/api/availability-check/expire','POST',{...body,reviewId:'old'},headers)).status,409);
+    assert.ok(jobs.every(j=>!store.get('jobs',j.id).expiredAt));
+    assert.deepEqual((await request('/api/availability-check/expire','POST',body,headers)).body,{expired:3});
+    assert.deepEqual((await request('/api/availability-check/expire','POST',body,headers)).body,{expired:0});
+    for(const [i,j] of jobs.entries()){const row=store.get('jobs',j.id);assert.equal(!!row.expiredAt,i<3);assert.equal(row.stage,j.stage);assert.equal(row.notes,'keep notes');}
+    assert.equal(store.list('contacts').length,3);
+    assert.equal((await request('/api/availability-check','POST',{mode:'browser'},headers)).body.report.total,2);
+  });
+  await t.test('reopened workspace keeps contacts and only excludes the same posting', async t => {
+    const {request,store,ingest}=await setup(t,{dbPath});
+    assert.ok(ingest({...original,url:'https://ma.linkedin.com/jobs/view/data-engineer-1001/?trk=x'}).skipped);
+    const next=ingest({...original,description:'A new opening without a recruitment address.',url:'https://www.linkedin.com/jobs/view/1012/'}); assert.ok(next.created);
+    const state=(await request('/api/state')).body;
+    assert.deepEqual(state.opportunities.items.find(i=>i.jobId===next.job.id).emails,[]);
+    assert.equal(state.contacts.find(c=>c.postingId===original.id).sourceUrl, original.url);
+    await request('/api/jobs/'+original.id,'DELETE');
+    assert.ok(store.list('contacts').some(c=>c.postingId===original.id)); assert.ok(ingest(original).skipped);
+  });
+});
+
+test('a failed-source retry preserves the original inbox without another LinkedIn request or CV', async t => {
+  let fail=true, release; const calls=[];
+  const posting=(n)=>({title:'Junior Data Engineer',company:'Sample',postedAt:'1 day ago',description:'Build data pipelines with Python and SQL for our data engineering team.',url:'https://example.org/jobs/'+n});
+  const {request}=await setup(t,{statusChecker:async()=>({ready:true}),researcher:async()=>[],ranker:assert.fail,
+    searcher:async(p,batch)=>{calls.push(p.jobSite);assert.ok(!('resume' in p));if(p.jobSite==='linkedin'){batch([posting(1)]);return {jobs:[posting(1)],summary:'found'};}
+      if(fail){await new Promise(r=>{release=r});throw Error('Source unavailable');}return {jobs:[posting(2)],summary:'found'};}});
+  const headers={'X-JobOS-Token':(await request('/api/state')).body.settings.token};
+  const scan=(await request('/api/codex/scan','POST',{},headers)).body;
+  let state=await waitState(request,s=>s.jobs.length===1 && !!release);
+  assert.equal(state.scans[0].status,'running'); assert.deepEqual(state.scans[0].newJobIds,[state.jobs[0].id]);
+  release();state=await waitState(request,s=>s.scans[0].status==='completed');assert.equal(state.scans[0].sourceResults[1].status,'failed');
+  fail=false;
+  assert.equal((await request('/api/codex/scan','POST',{retryOf:scan.id,jobSite:'linkedin'},headers)).status,400);
+  assert.equal((await request('/api/codex/scan','POST',{retryOf:scan.id,jobSite:'indeed'},headers)).status,202);
+  state=await waitState(request,s=>s.scans[0].newJobIds.length===2 && s.scans[0].status==='completed');
+  assert.deepEqual(calls,['linkedin','indeed','indeed']);assert.equal(state.rankings.length,0);assert.equal(state.tailorings.length,0);
+  assert.ok(state.scans[0].sourceResults.every(s=>s.status==='completed'));
 });
