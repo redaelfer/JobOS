@@ -26,6 +26,8 @@ Doctor uses local HTTP checks and prints setup facts only. It does not generate 
 
 ## Choose Indeed coverage
 
+For graduate employment searches across LinkedIn and Indeed, add `PFE, stage, internship, intern, stagiaire` to **Exclude terms** and save your search preferences. This excludes internship openings, including **projet de fin d’études**, **stage de fin d’études** and pre-employment internships. Previous internships mentioned as accepted experience in a regular job do not exclude that job. Start a fresh search after changing these terms; a paused Indeed run keeps its old preference snapshot.
+
 For Indeed search coverage, open **Settings → Search preferences → Indeed search connection** and select **Indeed opportunities → Morocco roles + junior remote**, then **Save Indeed settings**. The next manual Search now includes relevant Morocco roles even without “junior” in the title, excludes explicit advanced requirements, and keeps remote roles only with junior/entry-level evidence and no recognized country restriction excluding Morocco. Read the eligibility warnings before applying. Existing saved offers stay available for your own review; this setting does not clean them up automatically or change LinkedIn searches.
 
 ## Download a model from the app
@@ -60,11 +62,19 @@ These commands use the same authenticated download workflow and show progress. T
 3. In **Settings → Search preferences → Indeed search connection**, leave **Chrome session** selected. Check Indeed browser setup only checks extension presence; live access can still fail.
 4. Click **Search now** once. LinkedIn/company careers run first. Partial successes remain saved even if a source is throttled. The Indeed controller opens afterward; on first use, click **Allow access to Indeed**.
 5. Keep Chrome, the JobOS server and the controller open. You do not have to open Indeed in advance. If asked to verify/sign in, use **Open Indeed tab**, complete it yourself, return to the controller and click **Resume**. JobOS never solves a challenge.
-6. Unsupported pages pause too, with missing fields shown separately from verification requests. **Skip this unreadable page** continues with incomplete coverage; **Stop Indeed · keep saved offers** ends just that step. A paused search does not hold the AI-model lock. Resume uses the preferences captured when that search began. After a server/browser restart, use **Open / resume Indeed** in JobOS to continue the saved cursor. **Start a new search** ends the paused Indeed step, keeps its saved offers/contacts and searches again from LinkedIn using your current preferences. Paused does not mean loading.
+6. Unsupported layouts and loading timeouts are skipped automatically, with their links and missing-field reasons saved for **Indeed search review** on Offers after the search finishes. These pages are not added as detected jobs. Verification, sign-in, unexpected navigation and connection loss still pause; **Stop Indeed · keep saved offers** ends just that step. A paused search does not hold the AI-model lock. Resume uses the preferences captured when that search began. After a server/browser restart, use **Open / resume Indeed** in JobOS to continue the saved cursor. **Start a new search** ends the paused Indeed step, keeps its saved offers/contacts and searches again from LinkedIn using your current preferences. Paused does not mean loading.
 
 Readable roles are checked against saved fields/level/exclusions and the date window. Older/undated roles remain marked for review when broader coverage is enabled. Posting identity deduplicates variants; closed, expired and deleted offers stay excluded, while a distinct posting at the same employer may appear. Recruiting research uses the separate configured web source and can still be blocked. Nothing is applied to or sent automatically.
 
 To use your configured search API or the older public-server path instead, choose **Configured search provider** and Save Indeed source before a new run. Opening Indeed manually does not fix HTTP 403 in that mode because server requests do not use Chrome cookies. No route guarantees exhaustive coverage or bypasses site restrictions.
+
+## Close several offers together
+
+To show just one site's offers, click **LinkedIn** or **Indeed** in the Source buttons above the list. **All sources** shows all posting sites again, including employer pages. This combines with your other filters and does not change where Search now searches.
+
+In **Offers**, tick the boxes in the rightmost **Select** column. Click **Close selected (N)** above the list to close them in one click. The header checkbox selects every visible eligible offer; **Clear selection** unchecks them. Filters remove hidden offers from the selection, and newly detected offers stay unchecked. Contacts, notes and CV/email drafts remain saved. Use **Stage → Closed** to see or reopen closed offers. A different posting from the same company can still appear.
+
+If the app says a selected offer changed, refresh and select again. No offers in that request were closed. Bulk closing is separate from **Expire all confirmed**, which archives postings with reviewed closure evidence.
 
 ## Choose search independently
 
@@ -99,7 +109,7 @@ Check **AI models → Live search source**. For the local setup it should be **L
 ## Daily use
 
 1. In **Settings → Search preferences**, save your domains, experience level, location and date window once. A new workspace starts with data science, ML, AI engineering, full-stack and data engineering; graduate/entry level; Morocco and eligible remote roles; and 30 days. Existing preferences are kept.
-2. Open **Offers** and click **Search now**. No CV is needed and searches are manual. Verified batches appear as they arrive. Choose **New in last search** to isolate what was actually added. If a source fails, retry just that source; its results join the original search. There is no result quota. Older/undated postings are marked for availability review; an unknown date is not a new publication.
+2. Open **Offers** and click **Search now**. No CV is needed and searches are manual. Verified batches appear as they arrive. Choose **New in last search** to isolate what was actually added. If a source fails, retry just that source; its results join the original search. LinkedIn has no fixed result quota. Indeed stops at 100 distinct matching offers per search; it may check more pages to find them. Older/undated postings are marked for availability review; an unknown date is not a new publication.
 3. Read the posting, keywords and contact evidence. Published recruiting addresses appear first. Employer lookup runs separately. A general business address, a contact published for an earlier vacancy, or an unconfirmed professional profile is not a verified HR email.
 4. For a role you want, click **Tailor CV & email**. Save your accurate master `main.tex` once via **Settings → Master main.tex & drafts**. JobOS analyzes the requirements and drafts using this master, without a second CV upload. The offer language is selected by default (French/English); change it if needed. Review the separate CV and use **Copy recipient**, **Copy subject** and **Copy body**. Nothing is sent automatically.
 5. Use **Close** to skip an offer. Use **Check saved offers in browser** to find postings that explicitly stopped accepting applications. Review each notice and link, then select **Move to Expired** or **Expire all confirmed**. See archived postings with **Stage → Expired**. The archive keeps contacts, notes and drafts; jobs you already applied for also keep their application stage. A different posting from that employer can still appear.

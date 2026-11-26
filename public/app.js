@@ -1,7 +1,7 @@
 import { stages, analyzeResume, jobUrl } from '/domain.js';
 import { dailyOpportunities, filterOpportunities, opportunityCards } from '/opportunities-view.js';
-import { applicationContacts, applicationList, availabilityReview, closeOpportunityButton, searchNowButton } from '/application-tools.js';
-import { orderJobs, matchesPublication } from '/job-order.js';
+import { applicationContacts, applicationList, availabilityReview, closeOpportunityButton, searchNowButton, indeedSearchReview } from '/application-tools.js';
+import { orderJobs, matchesPublication, matchesOfferSource } from '/job-order.js';
 import { tailoringPage, tailoringResult, emailDraftUrl } from '/tailoring-view.js';
 import { aiModelsPage, updateAIForm, modelDownloadStatus, groundingSuggestions, aiQuotaHelp, searchAccessHelp, localModelCatalog } from '/ai-settings-view.js';
 import { uniqueSearchWarnings, searchSummary, searchFailureText, searchRunSource, searchSourceLabel } from '/search-warnings.js';
@@ -10,7 +10,9 @@ const $ = s => document.querySelector(s);
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const route = () => ['', 'daily', 'offers'].includes(location.hash.slice(1)) ? 'pipeline' : location.hash.slice(1);
 let lastSearchOnly = false;
-let state, page = route(), query = '', view = page === 'board' ? 'board' : 'list', filter = 'Saved', jobOrder = 'detected', jobPosted = 'all', toastTimer;
+const selectedOffers = new Map();
+let closingSelected = false;
+let state, page = route(), query = '', view = page === 'board' ? 'board' : 'list', filter = 'Saved', jobOrder = 'detected', jobPosted = 'all', jobSource = 'all', toastTimer;
 const dailyFilters = { range: 'all', mode: 'all', query: '', order: 'newest', posted: 'recent' };
 let texMaster = null, texLoading = false, texDirty = false, tailorJobId = '', tailorResult = null;
 let installedModels = [], installedModelsLoaded = false, downloadModelChoice = '';
@@ -56,7 +58,7 @@ function autoLaunchIndeed() {
   if (run?.status === 'waiting_browser' && !indeedLaunched.has(run.id) && document.documentElement.dataset.jobosIndeedSearch === '1') launchIndeed(run.id).catch(e => toast(e.message));
 }
 function indeedSettings() {
-  return `<section class="panel"><h2>Indeed search connection</h2><form id="indeed-settings" class="form-grid"><label class="full">Indeed source<select name="indeedSearchMode"><option value="browser" ${state.settings.indeedSearchMode !== 'provider' ? 'selected' : ''}>Chrome session · JobOS extension (recommended)</option><option value="provider" ${state.settings.indeedSearchMode === 'provider' ? 'selected' : ''}>Configured search provider · server access</option></select></label><label class="full">Indeed opportunities<select name="indeedOpportunityScope" aria-describedby="indeed-scope-help"><option value="preferences" ${state.settings.indeedOpportunityScope !== 'morocco-junior-remote' ? 'selected' : ''}>Use general location and experience preferences</option><option value="morocco-junior-remote" ${state.settings.indeedOpportunityScope === 'morocco-junior-remote' ? 'selected' : ''}>Morocco roles + junior remote</option></select></label><p id="indeed-scope-help" class="help full">Morocco roles + junior remote covers your domains in Morocco, including titles without “junior”, and excludes explicit senior or advanced requirements. Remote roles outside Morocco need junior/entry-level evidence; known country restrictions are excluded. Unconfirmed locations and Morocco eligibility stay flagged for review. Existing saved offers are kept.</p><div class="actions full"><button class="btn">Save Indeed settings</button><button type="button" class="btn" data-action="indeed-setup-test">Check Indeed browser setup</button></div></form><p class="help">Search now runs LinkedIn first, then Indeed. Browser mode needs Chrome and JobOS extension 0.4+. If challenged, complete verification yourself and Resume. Provider mode uses server requests and may receive HTTP 403. The general live-search test does not test Indeed.</p></section>`;
+  return `<section class="panel"><h2>Indeed search connection</h2><form id="indeed-settings" class="form-grid"><label class="full">Indeed source<select name="indeedSearchMode"><option value="browser" ${state.settings.indeedSearchMode !== 'provider' ? 'selected' : ''}>Chrome session · JobOS extension (recommended)</option><option value="provider" ${state.settings.indeedSearchMode === 'provider' ? 'selected' : ''}>Configured search provider · server access</option></select></label><label class="full">Indeed opportunities<select name="indeedOpportunityScope" aria-describedby="indeed-scope-help"><option value="preferences" ${state.settings.indeedOpportunityScope !== 'morocco-junior-remote' ? 'selected' : ''}>Use general location and experience preferences</option><option value="morocco-junior-remote" ${state.settings.indeedOpportunityScope === 'morocco-junior-remote' ? 'selected' : ''}>Morocco roles + junior remote</option></select></label><p id="indeed-scope-help" class="help full">Morocco roles + junior remote covers your domains in Morocco, including titles without “junior”, and excludes explicit senior or advanced requirements. Remote roles outside Morocco need junior/entry-level evidence; known country restrictions are excluded. Unconfirmed locations and Morocco eligibility stay flagged for review. Existing saved offers are kept.</p><div class="actions full"><button class="btn">Save Indeed settings</button><button type="button" class="btn" data-action="indeed-setup-test">Check Indeed browser setup</button></div></form><p class="help">Search now runs LinkedIn first, then saves up to 100 matching Indeed offers. Unreadable pages are skipped and listed afterward for your review. Browser mode needs Chrome and JobOS extension 0.4+. If challenged, complete verification yourself and Resume. Provider mode uses server requests and may receive HTTP 403. The general live-search test does not test Indeed.</p></section>`;
 }
 const aiName = () => state?.ai?.provider === 'codex' ? 'Codex' : state?.ai?.label || 'Codex';
 function searchAttemptNotice(run) {
@@ -119,7 +121,7 @@ function updateWorkflowStatus() {
   if (page === 'models' && $('#local-search-status')) $('#local-search-status').innerHTML = state.modelDownloads?.[0]?.tool === 'searxng' ? modelDownloadStatus(state.modelDownloads[0]) : '';
 }
 const titles = { board: 'Application board', 'daily-report': 'Historical fit reports', help: 'Help & local setup', models: 'AI models', tailor: 'CV & email tailoring', daily: 'Daily opportunities', pipeline: 'Offers', search: 'Job search', automation: 'Search history & employers', alerts: 'Discover & alerts', reminders: 'Follow-ups', contacts: 'People', studio: 'Career studio', codex: 'CV & AI ranking', settings: 'Settings & integrations' };
-async function api(path, method = 'GET', body) { const headers = body ? { 'Content-Type': 'application/json' } : {}; if (path.startsWith('codex/') || path.startsWith('ai/') || path.startsWith('availability-check')) headers['X-JobOS-Token'] = state?.settings.token || ''; const res = await fetch(`/api/${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined, signal: path === 'state' ? AbortSignal.timeout(10000) : undefined }); const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Something went wrong.'); return data; }
+async function api(path, method = 'GET', body) { const headers = body ? { 'Content-Type': 'application/json' } : {}; if (path.startsWith('codex/') || path.startsWith('ai/') || path.startsWith('availability-check') || path === 'jobs/close-selected') headers['X-JobOS-Token'] = state?.settings.token || ''; const res = await fetch(`/api/${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined, signal: path === 'state' ? AbortSignal.timeout(10000) : undefined }); const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Something went wrong.'); return data; }
 function toast(text) { $('#toast').textContent = text; $('#toast').classList.add('visible'); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').classList.remove('visible'), 5500); }
 async function refresh() { state = await api('state'); connectionLost = false; lastStatusCheck = new Date(); render(); }
 async function loadTex() {
@@ -171,6 +173,7 @@ function render() {
   if (page === 'pipeline' || page === 'board' || page === 'daily-report') {
     $('.page-heading').insertAdjacentHTML('afterend', `<section class="panel" id="availability-review">${availabilityReview(state.jobs, state.availabilityCheck)}</section>`);
   }
+  updateOfferSelection();
   updateWorkflowStatus();
   if (page === 'models') updateAIForm(document, state.ai);
   if (page === 'tailor' && texMaster === null) loadTex();
@@ -180,14 +183,41 @@ function pipeline() {
   const failed = (last?.sourceResults || []).filter(s => ['failed', 'partial', 'skipped'].includes(s.status));
   return heading('YOUR JOB SEARCH', 'Offers', 'Review new postings, find a recruiting contact, and prepare a CV and email when you choose.', '<div class="actions heading-actions">' + searchNowButton(codexBusy()) + btn('＋ Add opportunity', 'add-job') + '</div>')
     + (last ? '<div class="panel" role="status"><strong>' + (last.newJobIds?.length || 0) + ' new in last search</strong>' + (last.status === 'running' ? ' · Search in progress' : '') + failed.map(s => ' · ' + (s.jobSite === 'indeed' ? 'Indeed' : 'LinkedIn and company careers') + ' incomplete ' + btn('Retry ' + (s.jobSite === 'indeed' ? 'Indeed' : 'LinkedIn and company careers'), 'retry-source', '', 'data-site="' + esc(s.jobSite) + '" data-run="' + esc(last.id) + '"' + (codexBusy() ? ' disabled' : ''))).join('') + '</div>' : '')
+    + indeedSearchReview(last)
+    + `<div class="tabs offer-source-filter" role="group" aria-label="Filter offers by source"><span>Source</span>${[['all', 'All sources'], ['linkedin', 'LinkedIn'], ['indeed', 'Indeed']].map(([value, label]) => btn(label, 'offer-source', jobSource === value ? 'selected' : '', `data-source="${value}" aria-pressed="${jobSource === value}"`)).join('')}</div>`
     + `<div class="toolbar application-toolbar"><div class="tabs">${btn('New in last search', 'last-search-filter', lastSearchOnly ? 'selected' : '', 'aria-pressed="' + lastSearchOnly + '"')}</div><div class="tools"><input class="search" id="search" aria-label="Search opportunities" placeholder="Search opportunities…" value="${esc(query)}"><label>Publication<select id="job-posted" aria-label="Filter applications by publication date">${[['all', 'All saved'], ['1', 'Last 24 hours'], ['7', 'Last 7 days'], ['14', 'Last 14 days'], ['30', 'Last 30 days'], ['unknown', 'Date unconfirmed']].map(([value, label]) => `<option value="${value}" ${jobPosted === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label><label>Sort<select id="job-sort" aria-label="Sort applications">${[['newest', 'Latest posted'], ['detected', 'Recently detected']].map(([value, label]) => `<option value="${value}" ${jobOrder === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label><label>Stage<select id="stage-filter" aria-label="Filter by stage">${options(['All stages', ...stages, 'Expired'], filter)}</select></label></div></div>`
     + `<div id="jobs-area">${jobArea()}</div><p class="section-note">Latest posted uses source dates; relative dates are approximate and unknown dates appear last. Open an opportunity for details or choose Tailor CV & email.</p>`;
 }
 function jobArea() {
   const lastIds = new Set(state.scans?.[0]?.newJobIds || []);
-  const jobs = orderJobs(state.jobs.filter(j => (!lastSearchOnly || lastIds.has(j.id)) && matchesPublication(j, jobPosted) && `${j.title} ${j.company} ${j.location}`.toLowerCase().includes(query.toLowerCase()) && (filter === 'All stages' || (filter === 'Expired' ? !!j.expiredAt : j.stage === filter && !(filter === 'Saved' && j.expiredAt)))), jobOrder);
-  if (view === 'list' || filter === 'Expired') return jobs.length ? applicationList(jobs, state.opportunities.items, stages) : empty('⌕', 'No opportunities here yet', 'Add an opportunity or try another search.');
+  const jobs = orderJobs(state.jobs.filter(j => matchesOfferSource(j, jobSource) && (!lastSearchOnly || lastIds.has(j.id)) && matchesPublication(j, jobPosted) && `${j.title} ${j.company} ${j.location}`.toLowerCase().includes(query.toLowerCase()) && (filter === 'All stages' || (filter === 'Expired' ? !!j.expiredAt : j.stage === filter && !(filter === 'Saved' && j.expiredAt)))), jobOrder);
+  for (const [id, expected] of selectedOffers) {
+    const job = jobs.find(j => j.id === id);
+    if (!job || job.expiredAt || job.stage === 'Closed' || (job.url || '') !== expected.expectedUrl || job.stage !== expected.expectedStage) selectedOffers.delete(id);
+  }
+  if (view === 'list' || filter === 'Expired') return jobs.length ? `<div id="bulk-offer-actions" class="bulk-offer-actions" ${selectedOffers.size ? '' : 'hidden'}><span id="selected-offer-count" aria-live="polite"></span><button type="button" class="btn primary" data-action="close-selected">Close selected</button><button type="button" class="btn" data-action="clear-selection">Clear selection</button></div>` + applicationList(jobs, state.opportunities.items, stages, selectedOffers, closingSelected) : empty('⌕', 'No opportunities here yet', 'Add an opportunity or try another search.');
   return `<div class="board">${stages.filter(s => filter === 'All stages' || s === filter).map(s => { const group = jobs.filter(j => j.stage === s && !(s === 'Saved' && j.expiredAt)); return `<section class="column"><div class="column-header"><span class="dot"></span>${s}<span class="count">${group.length}</span><button data-action="add-job" data-stage="${s}" aria-label="Add to ${s}">＋</button></div>${group.map(j => `<article class="job-card"><button class="job-card-open" data-action="edit-job" data-id="${j.id}"><div class="company-line"><span class="company-icon">${esc(j.company.slice(0, 2).toUpperCase())}</span>${esc(j.company)}</div><h3>${esc(j.title)}</h3><div class="location">${esc(j.location || 'Location not added')}</div>${j.salary ? `<div class="tags"><span class="tag">${esc(j.salary)}</span></div>` : ''}<div class="job-bottom"><span>${esc(j.source)}</span><span>${date(j.createdAt)}</span></div></button>${applicationContacts(state.opportunities.items.find(item => item.jobId === j.id), true)}<button class="btn card-tailor" data-action="prepare-job" data-id="${j.id}">Tailor CV & email</button>${closeOpportunityButton(j)}</article>`).join('') || `<div class="empty-column">Room for your next<br>${s === 'Offer' ? 'great offer' : 'opportunity'}.</div>`}</section>`; }).join('')}</div>`;
+}
+function updateOfferSelection() {
+  const boxes = [...document.querySelectorAll('[data-select-job]')];
+  const selected = boxes.filter(box => selectedOffers.has(box.dataset.selectJob));
+  for (const box of boxes) { box.checked = selectedOffers.has(box.dataset.selectJob); box.disabled = closingSelected; box.closest('tr').classList.toggle('selected-offer', box.checked); }
+  const all = $('#select-visible-offers');
+  if (all) { all.checked = boxes.length > 0 && selected.length === boxes.length; all.indeterminate = selected.length > 0 && selected.length < boxes.length; all.disabled = closingSelected || !boxes.length; }
+  const bar = $('#bulk-offer-actions');
+  if (bar) {
+    bar.hidden = !selected.length;
+    $('#selected-offer-count').textContent = `${selected.length} offer${selected.length === 1 ? '' : 's'} selected`;
+    const button = bar.querySelector('[data-action="close-selected"]');
+    button.textContent = closingSelected ? 'Closing selected…' : `Close selected (${selected.length})`;
+    for (const control of bar.querySelectorAll('button')) control.disabled = closingSelected;
+  }
+}
+function renderJobArea() { $('#jobs-area').innerHTML = jobArea(); updateOfferSelection(); }
+function selectOffer(id, checked) {
+  const job = state.jobs.find(j => j.id === id);
+  if (checked && job && !job.expiredAt && job.stage !== 'Closed') selectedOffers.set(id, { id, expectedUrl: job.url || '', expectedStage: job.stage });
+  else selectedOffers.delete(id);
 }
 function alerts() {
   const configured = state.mailbox.configured;
@@ -315,6 +345,7 @@ document.addEventListener('click', async e => {
       } finally { el.disabled = false; }
       return;
     }
+    if (action === 'offer-source') { if (!['all', 'linkedin', 'indeed'].includes(el.dataset.source)) return; jobSource = el.dataset.source; return render(); }
     if (action === 'last-search-filter') { lastSearchOnly = !lastSearchOnly; return render(); }
     if (action === 'indeed-resume') { el.disabled = true; try { await launchIndeed(el.dataset.id); await refresh(); } finally { el.disabled = false; } return; }
     if (action === 'indeed-stop') { await api('codex/scan/' + el.dataset.id + '/browser', 'POST', { action: 'stop' }); await refresh(); return toast('Indeed stopped. All saved offers are kept.'); }
@@ -352,6 +383,20 @@ document.addEventListener('click', async e => {
         await refresh(); return toast(result.expired + ' marked expired. Contacts and application history kept.');
       } finally { el.disabled = false; }
     }
+    if (action === 'clear-selection') { if (closingSelected) return; selectedOffers.clear(); updateOfferSelection(); return; }
+    if (action === 'close-selected') {
+      if (closingSelected) return;
+      const visible = new Set([...document.querySelectorAll('[data-select-job]')].map(box => box.dataset.selectJob));
+      const jobs = [...selectedOffers.values()].filter(item => visible.has(item.id));
+      if (!jobs.length) return;
+      closingSelected = true; updateOfferSelection();
+      try {
+        const result = await api('jobs/close-selected', 'POST', { jobs });
+        for (const id of result.jobIds) selectedOffers.delete(id);
+        await refresh(); toast(`${result.closed} selected offers closed. Contacts, history and notes kept.`);
+      } finally { closingSelected = false; updateOfferSelection(); }
+      return;
+    }
     if (action === 'close-job') {
       if (state.jobs.find(job => job.id === id)?.stage === 'Closed') return;
       el.disabled = true;
@@ -366,7 +411,7 @@ document.addEventListener('click', async e => {
     if (action === 'add-contact' || action === 'edit-contact') return contactModal(id);
     if (action === 'add-reminder') return reminderModal();
     if (action === 'job-reminder') { $('#modal').close(); return reminderModal(id); }
-    if (action === 'board-view' || action === 'list-view') { e.preventDefault(); page = action === 'board-view' ? 'board' : 'pipeline'; view = page === 'board' ? 'board' : 'list'; history.replaceState(null, '', '#' + page); return render(); }
+    if (action === 'board-view' || action === 'list-view') { selectedOffers.clear(); e.preventDefault(); page = action === 'board-view' ? 'board' : 'pipeline'; view = page === 'board' ? 'board' : 'list'; history.replaceState(null, '', '#' + page); return render(); }
     if (action.startsWith('delete-')) {
       if (!confirm(action === 'delete-job' ? 'Delete this offer? JobOS will remember its posting link and skip it in future searches and imports. This cannot be undone.' : 'Delete this record? This cannot be undone.')) return;
       await api(`${{ 'delete-job': 'jobs', 'delete-contact': 'contacts', 'delete-reminder': 'reminders' }[action]}/${id}`, 'DELETE'); $('#modal').close(); await refresh(); return toast(action === 'delete-job' ? 'Offer deleted. This posting will not be added again.' : 'Record deleted.');
@@ -424,7 +469,7 @@ document.addEventListener('submit', async e => {
   } catch (error) { const target = form.closest('dialog')?.querySelector('#form-error'); if (target) target.textContent = error.message; else toast(error.message); }
   finally { if (submit) submit.disabled = false; if (form.id === 'linkedin-search-form') updateSearchResults(); }
 });
-document.addEventListener('input', e => { if (e.target.id === 'search') { query = e.target.value; $('#jobs-area').innerHTML = jobArea(); } if (e.target.id === 'daily-query') { dailyFilters.query = e.target.value; updateDailyCards(); } if (e.target.id === 'tex-source') { texDirty = true; if (texMaster) texMaster.source = e.target.value; $('#tex-source-status').textContent = 'Unsaved edits — saved before tailoring.'; } });
+document.addEventListener('input', e => { if (e.target.id === 'search') { query = e.target.value; renderJobArea(); } if (e.target.id === 'daily-query') { dailyFilters.query = e.target.value; updateDailyCards(); } if (e.target.id === 'tex-source') { texDirty = true; if (texMaster) texMaster.source = e.target.value; $('#tex-source-status').textContent = 'Unsaved edits — saved before tailoring.'; } });
 document.addEventListener('change', async e => { try {
   if (e.target.id === 'ai-provider' || e.target.id === 'ai-search-provider') updateAIForm(document, state.ai, e.target.id === 'ai-provider');
   if (e.target.id === 'tex-file') {
@@ -442,13 +487,15 @@ document.addEventListener('change', async e => { try {
     state.settings.resume = result.text; state.settings.resumeFilename = result.filename;
     $('#cv-form textarea').value = result.text; $('#cv-file-status').textContent = ` ${result.filename} · ${result.characters} characters`; toast('CV imported. Review the extracted text before ranking.');
   }
-  if (e.target.id === 'stage-filter') { filter = e.target.value; $('#jobs-area').innerHTML = jobArea(); }
-  if (e.target.id === 'job-sort') { jobOrder = e.target.value; $('#jobs-area').innerHTML = jobArea(); }
-  if (e.target.id === 'job-posted') { jobPosted = e.target.value; $('#jobs-area').innerHTML = jobArea(); }
+  if (e.target.dataset.selectJob) { if (!closingSelected) selectOffer(e.target.dataset.selectJob, e.target.checked); updateOfferSelection(); return; }
+  if (e.target.id === 'select-visible-offers') { if (!closingSelected) for (const box of document.querySelectorAll('[data-select-job]')) selectOffer(box.dataset.selectJob, e.target.checked); updateOfferSelection(); return; }
+  if (e.target.id === 'stage-filter') { filter = e.target.value; renderJobArea(); }
+  if (e.target.id === 'job-sort') { jobOrder = e.target.value; renderJobArea(); }
+  if (e.target.id === 'job-posted') { jobPosted = e.target.value; renderJobArea(); }
   if (e.target.dataset.stageJob) { await api(`jobs/${e.target.dataset.stageJob}`, 'PATCH', { stage: e.target.value }); await refresh(); toast('Stage updated.'); }
   if (e.target.id === 'email-file') { const file = e.target.files[0]; if (!file) return; if (file.size > 1000000) throw new Error('Choose an email smaller than 1 MB.'); const r = await api('import-email', 'POST', { raw: await file.text() }); await refresh(); toast(`${r.imported} new opportunities imported (${r.found} job links found).`); }
 } catch (error) { toast(error.message); if (e.target.id === 'cv-file' && $('#cv-file-status')) $('#cv-file-status').textContent = error.message; } });
-window.addEventListener('hashchange', () => { page = route(); view = page === 'board' ? 'board' : 'list'; if (state) render(); });
+window.addEventListener('hashchange', () => { selectedOffers.clear(); page = route(); view = page === 'board' ? 'board' : 'list'; if (state) render(); });
 $('#modal').addEventListener('click', e => { if (e.target === $('#modal')) $('#modal').close(); });
 async function backgroundRefresh(allowRender = true) {
   if (polling) return; polling = true;
@@ -468,7 +515,7 @@ async function backgroundRefresh(allowRender = true) {
     const jobsChanged = JSON.stringify(next.jobs) !== JSON.stringify(state.jobs) || JSON.stringify(next.opportunities) !== JSON.stringify(state.opportunities);
     if (jobsChanged || scansChanged) offersDirty = true;
     state = next;
-    if (jobsChanged && ['pipeline', 'board'].includes(page) && $('#jobs-area') && !$('#modal').open && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) $('#jobs-area').innerHTML = jobArea();
+    if (jobsChanged && ['pipeline', 'board'].includes(page) && $('#jobs-area') && !$('#modal').open && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) renderJobArea();
     if (availabilityChanged && $('#availability-review')) $('#availability-review').innerHTML = availabilityReview(state.jobs, state.availabilityCheck);
     updateScanResult();
     await updateTailoring(next);

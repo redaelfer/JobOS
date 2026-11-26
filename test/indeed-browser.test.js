@@ -45,6 +45,23 @@ test('scoped browser ingestion keeps Moroccan roles and junior remote while reje
   assert.equal(store.get('indeedBrowserRuns', 'run').preferences.indeedOpportunityScope, 'morocco-junior-remote');
 });
 
+test('Indeed browser uses the same internship exclusions and keeps jobs mentioning prior internship experience', t => {
+  const { manager, store } = fixture(t, { searchExclude: 'senior, unpaid, PFE, stage, internship, intern, stagiaire' });
+  const { ticket } = manager.launch('run');
+  let next = manager.step(ticket, { action: 'next' });
+  const rows = [
+    { ...job(1), title: 'Stage Data Scientist' },
+    { ...job(2), title: 'PFE Data Scientist' },
+    { ...job(3), description: 'Build data science models in Python. Employment type: Internship' },
+    { ...job(4), description: 'Build data science models in Python. Previous internships count as experience.' },
+    { ...job(5), title: 'Early-stage Data Scientist' },
+    { ...job(6), title: 'Chargé(e) de communication', description: 'Créer du contenu pour notre application. Aisance avec les outils d’intelligence artificielle.' }
+  ];
+  next = manager.step(ticket, { action: 'result', taskId: next.task.id, url: next.task.url, links: rows.map(j => j.url) });
+  for (const row of rows) next = manager.step(ticket, { action: 'result', taskId: next.task.id, url: row.url, job: row });
+  assert.deepEqual(store.list('jobs').map(j => j.postingUrl).sort(), [url(4), url(5)]);
+});
+
 test('selected-job vjk on the same listing continues to capture a direct Indeed posting link', t => {
   const { manager, store } = fixture(t); const { ticket } = manager.launch('run');
   let next = manager.step(ticket, { action: 'next' });
@@ -117,6 +134,49 @@ test('browser discovery persists >25 jobs, pagination and separate review querie
   manager.stop('run'); assert.equal(store.list('jobs').length, 27);
   assert.equal(store.get('scans', 'run').sourceResults.at(-1).status, 'skipped');
 });
+
+test('Indeed stops at 100 distinct matching offers, not 100 checked pages, across resume and repeated results', t => {
+  const { manager, store } = fixture(t, { indeedOpportunityScope: 'morocco-junior-remote', searchExclude: 'PFE, stage, internship' });
+  let { ticket } = manager.launch('run'); let next = manager.step(ticket, { action: 'next' });
+  next = manager.step(ticket, { action: 'result', taskId: next.task.id, url: next.task.url, links: [...Array.from({ length: 110 }, (_, i) => url(i + 1)), url(8)] });
+  for (let n = 1; !next.done; n++) {
+    assert.ok(n <= 104, 'no extra page requested after 100 matches');
+    if (n === 50) { manager.restart(); ticket = manager.launch('run').ticket; next = manager.step(ticket, { action: 'next' }); }
+    const data = n === 4 ? { attention: 'unsupported_layout', missing: ['description'] } : { url: url(n), job: { ...job(n), ...(n === 1 ? { title: 'Nurse', description: 'Treat patients and provide care in a local clinic.' } : n === 2 ? { title: 'Senior Data Scientist' } : n === 3 ? { title: 'PFE Data Scientist' } : {}) } };
+    const result = { action: 'result', taskId: next.task.id, ...data };
+    next = manager.step(ticket, result);
+    if (!next.done) assert.deepEqual(manager.step(ticket, result), next);
+  }
+  assert.equal(next.checked, 104); assert.equal(next.saved, 100); assert.equal(next.matchLimit, 100);
+  assert.equal(store.list('jobs').length, 100); assert.match(next.reason, /100 matching offers/);
+  const run = store.get('indeedBrowserRuns', 'run'); assert.equal(run.queue.length, 0); assert.equal(run.current, null);
+  const source = store.get('scans', 'run').sourceResults.at(-1);
+  assert.equal(source.limitReached, true); assert.equal(source.unreadablePages[0].url, url(4));
+  assert.equal(Object.values(source.rejected).reduce((a,b)=>a+b,0), 3);
+  assert.equal(manager.step(ticket, { action: 'next' }).done, true);
+  assert.equal(store.list('jobs').length, 100);
+});
+
+test('unreadable details and listing pages are retained for review and advance automatically', t => {
+  const { manager, store } = fixture(t); const initial=store.get('indeedBrowserRuns','run');
+  store.put('indeedBrowserRuns', { ...initial, queue: initial.queue.slice(0,2) });
+  const { ticket }=manager.launch('run'); let next=manager.step(ticket,{action:'next'});
+  const listing=next.task;
+  next=manager.step(ticket,{action:'result',taskId:next.task.id,attention:'load_timeout'});
+  assert.equal(next.status,'running'); assert.notEqual(next.task.id,listing.id);
+  next=manager.step(ticket,{action:'result',taskId:next.task.id,url:next.task.url,links:[url(1),url(2),url(3)]});
+  next=manager.step(ticket,{action:'result',taskId:next.task.id,attention:'unsupported_layout',missing:['description','PRIVATE_TEXT'],job:job(1)});
+  assert.equal(next.status,'running'); assert.equal(next.task.url,url(2));
+  next=manager.step(ticket,{action:'result',taskId:next.task.id,url:url(2),unreadable:true});
+  assert.equal(next.task.url,url(3));
+  next=manager.step(ticket,{action:'result',taskId:next.task.id,url:url(3),job:job(3)});
+  assert.equal(next.done,true); assert.equal(store.list('jobs').length,1);
+  const report=store.get('scans','run').sourceResults.at(-1);
+  assert.equal(report.unreadable,3); assert.equal(report.status,'partial');
+  assert.deepEqual(report.unreadablePages.map(p=>p.url),[listing.url,url(1),url(2)]);
+  assert.doesNotMatch(JSON.stringify(report),/PRIVATE_TEXT/);
+  manager.restart(); assert.deepEqual(store.get('scans','run').sourceResults.at(-1).unreadablePages,report.unreadablePages);
+});
 test('challenge/restart/lease preserve cursor, reject old tickets and release workflow while paused', t => {
   const { store, manager, clock, busy } = fixture(t);
   const { ticket } = manager.launch('run'); const first = manager.step(ticket, { action: 'next' });
@@ -179,6 +239,32 @@ test('DOM reader distinguishes challenge, listing cards, unsupported page and jo
   assert.equal(detail.ready, true); assert.equal(detail.job.company, 'Fixture');
   assert.ok(!detail.job.description.includes('cookies'));
 });
+test('LinkedIn saves matching batches before Indeed is created, and only hands off when LinkedIn finishes', async t => {
+  let release, started;
+  const gate = new Promise(resolve => { release = resolve; });
+  const began = new Promise(resolve => { started = resolve; });
+  const calls = [];
+  const app = createApp({ dbPath: ':memory:', statusChecker: async () => ({ ready: true }), researcher: async () => [], searcher: async (prefs, accept) => {
+    calls.push(prefs.jobSite);
+    accept([{ ...job(1), url: 'https://www.linkedin.com/jobs/view/123456789/', verification: 'found on public posting' }]);
+    started(); await gate;
+    return { jobs: [], summary: 'LinkedIn finished', warnings: [] };
+  } });
+  app.store.put('settings', { ...app.store.get('settings', 'main'), ...settings, searchExclude: 'PFE, stage, internship' });
+  app.server.listen(0, '127.0.0.1'); await once(app.server, 'listening');
+  t.after(async () => { release(); app.server.closeAllConnections(); await new Promise(r => app.server.close(r)); app.store.db.close(); });
+  const response = await fetch('http://127.0.0.1:' + app.server.address().port + '/api/codex/scan', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-JobOS-Token': app.store.get('settings', 'main').token }, body: '{}' });
+  const run = await response.json(); await began;
+  assert.deepEqual(calls, ['linkedin']); assert.equal(app.store.list('jobs').length, 1);
+  assert.equal(app.store.list('indeedBrowserRuns').length, 0, 'no Indeed browser step while LinkedIn is running');
+  assert.equal(app.store.get('scans', run.id).newJobIds.length, 1, 'LinkedIn batch already persisted');
+  release();
+  for (let i = 0; i < 100 && !app.store.get('indeedBrowserRuns', run.id); i++) await new Promise(r => setTimeout(r, 10));
+  assert.equal(app.store.get('scans', run.id).status, 'waiting_browser');
+  assert.equal(app.store.get('indeedBrowserRuns', run.id).preferences.exclude, 'PFE, stage, internship');
+  assert.equal(app.store.list('jobs').length, 1); assert.deepEqual(calls, ['linkedin']);
+});
+
 test('HTTP scan hands off after LinkedIn, keeps partial results and isolates browser tickets', async t => {
   const calls = [];
   const app = createApp({ dbPath: ':memory:', statusChecker: async () => ({ ready: true }), searcher: async (prefs, accept) => {
@@ -242,11 +328,11 @@ test('unknown or unselected detail pages report missing fields, never verificati
   assert.equal(impostor.attention, 'wrong_page');
 });
 
-test('layout and timeout pauses keep the exact task, with distinct safe explanations', t => {
+test('verification, sign-in and unexpected navigation still pause on the exact task', t => {
   const { manager, store } = fixture(t); const { ticket } = manager.launch('run');
   const first = manager.step(ticket, { action: 'next' });
-  for (const [attention, pattern] of [['unsupported_layout', /No verification challenge/], ['load_timeout', /did not finish loading/], ['wrong_page', /no longer on the expected/], ['verification', /showing verification/]]) {
-    const result = manager.step(ticket, { action: 'result', taskId: first.task.id, attention, missing: ['description', 'PRIVATE_TEXT'] });
+  for (const [attention, pattern, blocked] of [['wrong_page', /no longer on the expected/], ['verification', /showing verification/], ['sign_in', /asking you to sign in/], ['unsupported_layout', /showing verification/, true]]) {
+    const result = manager.step(ticket, { action: 'result', taskId: first.task.id, attention, blocked, unreadable: true, missing: ['description', 'PRIVATE_TEXT'] });
     assert.equal(result.status, 'paused'); assert.match(result.reason, pattern);
     assert.doesNotMatch(result.reason, /PRIVATE_TEXT/); assert.equal(store.list('jobs').length, 0);
     assert.equal(manager.step(ticket, { action: 'resume' }).task.id, first.task.id);

@@ -4,8 +4,8 @@ import { readFile } from 'node:fs/promises';
 import { JSDOM } from 'jsdom';
 import { stages, analyzeResume, jobUrl } from '../lib/domain.js';
 import { dailyOpportunities, filterOpportunities, opportunityCards } from '../public/opportunities-view.js';
-import { applicationContacts, applicationList, availabilityReview, closeOpportunityButton, searchNowButton } from '../public/application-tools.js';
-import { orderJobs, matchesPublication } from '../public/job-order.js';
+import { applicationContacts, applicationList, availabilityReview, closeOpportunityButton, searchNowButton, indeedSearchReview } from '../public/application-tools.js';
+import { orderJobs, matchesPublication, matchesOfferSource } from '../public/job-order.js';
 import { tailoringPage, tailoringResult, emailDraftUrl } from '../public/tailoring-view.js';
 import { aiModelsPage, updateAIForm, modelDownloadStatus, groundingSuggestions, aiQuotaHelp, searchAccessHelp, localModelCatalog } from '../public/ai-settings-view.js';
 import { uniqueSearchWarnings, searchSummary, searchFailureText, searchRunSource, searchSourceLabel } from '../lib/search-warnings.js';
@@ -22,7 +22,7 @@ async function setup(t, page = 'search', jobs = [], workflows = {}) {
   const state = { ai: publicAI({}, credentialStore(null, {})), modelDownloads: [], settings, jobs, rankings: [], searches: [], scans: [], tailorings: [], companies: [], contacts: [], reminders: [], alerts: [], mailbox: {}, opportunities: buildOpportunities({ settings, jobs }), ...workflows };
   const calls = [], intervals = [], network = { fail: false, searchTest: null, jobPatchError: '', browserStopError: '', localModels: [{ name: 'qwen3:4b', size: 2500000000, parameters: '4B' }] };
   const dom = new JSDOM(html, { url: 'http://jobos.test/#' + page, runScripts: 'outside-only' });
-  Object.assign(dom.window, { stages, analyzeResume, jobUrl, dailyOpportunities, filterOpportunities, opportunityCards, applicationContacts, applicationList, searchNowButton, orderJobs, matchesPublication, tailoringPage, tailoringResult, emailDraftUrl, aiModelsPage, updateAIForm, modelDownloadStatus, groundingSuggestions, aiQuotaHelp, setInterval: (callback, delay) => { intervals.push({ callback, delay }); return intervals.length; }, fetch: async (path, options = {}) => {
+  Object.assign(dom.window, { stages, analyzeResume, jobUrl, dailyOpportunities, filterOpportunities, opportunityCards, applicationContacts, applicationList, searchNowButton, indeedSearchReview, orderJobs, matchesPublication, matchesOfferSource, tailoringPage, tailoringResult, emailDraftUrl, aiModelsPage, updateAIForm, modelDownloadStatus, groundingSuggestions, aiQuotaHelp, setInterval: (callback, delay) => { intervals.push({ callback, delay }); return intervals.length; }, fetch: async (path, options = {}) => {
     const body = options.body ? JSON.parse(options.body) : undefined;
     calls.push({ path, method: options.method || 'GET', body });
     if (path === '/api/state' && network.fail) throw new Error('Synthetic connection loss');
@@ -31,6 +31,13 @@ async function setup(t, page = 'search', jobs = [], workflows = {}) {
       Object.assign(state.jobs.find(job => job.id === path.split('/').at(-1)), body);
     }
     let value = state;
+    if (path === '/api/jobs/close-selected' && options.method === 'POST') {
+      assert.equal(options.headers['X-JobOS-Token'], settings.token);
+      if (network.bulkCloseWait) await network.bulkCloseWait;
+      if (network.jobPatchError) return { ok: false, json: async () => ({ error: network.jobPatchError }) };
+      for (const item of body.jobs) state.jobs.find(job => job.id === item.id).stage = 'Closed';
+      value = { closed: body.jobs.length, jobIds: body.jobs.map(job => job.id) };
+    }
     if (/^\/api\/codex\/scan\/[^/]+\/browser$/.test(path) && body?.action === 'stop') {
       if (network.browserStopError) return { ok: false, json: async () => ({ error: network.browserStopError }) };
       state.scans.find(r => r.id === path.split('/')[4]).status = 'completed'; value = { done: true };
@@ -71,6 +78,18 @@ test('paused Indeed shows browser instructions and an enabled explicit fresh-sea
   assert.ok(document.querySelector('[data-action="indeed-stop"]'));
   assert.match(document.querySelector('#workflow-status').textContent, /No AI model is running/);
   assert.equal(calls.filter(c => c.method === 'POST').length, 0);
+});
+
+test('finished Indeed shows unreadable links for later review without starting another search', async t => {
+  const report={id:'done',status:'completed',sourceResults:[{jobSite:'indeed',status:'partial',checked:150,matched:100,jobCount:100,limitReached:true,unreadable:2,rejected:{outsideDomains:30,outsideLevel:18},unreadablePages:[{url:'https://ma.indeed.com/viewjob?jk=0123456789abcdef',type:'detail',reason:'Unsupported <layout>',missing:['description']},{url:'javascript:alert(1)',type:'detail',reason:'Trap'}]}]};
+  const {document,calls}=await setup(t,'pipeline',[],{scans:[report]});
+  const panel=document.querySelector('#indeed-search-review');
+  assert.match(panel.textContent,/150 postings checked.*100 matching offers saved.*48 rejected/);
+  assert.match(panel.textContent,/Stopped at 100 matching offers/);
+  assert.equal(panel.querySelectorAll('a').length,1);
+  assert.match(panel.querySelector('a').href,/ma\.indeed\.com\/viewjob/);
+  assert.equal(panel.querySelector('layout'),null);
+  assert.equal(calls.some(c=>c.method!=='GET'),false);
 });
 for (const page of ['pipeline', 'search']) test(`${page}: fresh search ends only the observed paused step before starting, without deleting records`, async t => {
   const jobs = [{ id: 'keep', title: 'Junior engineer', company: 'Fixture', stage: 'Saved', url: 'https://example.org/job', notes: 'Keep my notes' }];
@@ -165,6 +184,112 @@ test('actual daily UI defaults to recent dates and retains historical offers thr
   assert.equal(document.querySelectorAll('.opportunity-card').length, 1);
   assert.equal(document.querySelector('.opportunity-card').dataset.jobId, 'unknown');
 });
+const selectableJobs = () => [
+  { id: 'one', title: 'Junior <Engineer>', company: 'Fixture', stage: 'Saved', url: 'https://example.org/1', notes: 'Keep' },
+  { id: 'two', title: 'Data Scientist', company: 'Fixture', stage: 'Saved', url: 'https://example.org/2' },
+  { id: 'three', title: 'Full-stack developer', company: 'Fixture', stage: 'Saved', url: 'https://example.org/3' },
+  { id: 'closed', title: 'Closed job', company: 'Fixture', stage: 'Closed', url: 'https://example.org/4' },
+  { id: 'expired', title: 'Expired job', company: 'Fixture', stage: 'Saved', url: 'https://example.org/5', expiredAt: new Date().toISOString() }
+];
+test('source buttons filter by posting site, combine with other filters and drop hidden selections', async t => {
+  const jobs = [
+    { id: 'linked', title: 'Engineer', company: 'Fixture', stage: 'Saved', url: 'https://ma.linkedin.com/jobs/view/101/', source: 'Manual', postedAt: new Date().toISOString() },
+    { id: 'indeed', title: 'Data Scientist', company: 'Fixture', stage: 'Saved', url: 'https://ma.indeed.com/viewjob?jk=0123456789abcdef', source: 'Indeed browser', postedAt: new Date().toISOString() },
+    { id: 'older', title: 'Older engineer', company: 'Fixture', stage: 'Saved', url: 'https://www.indeed.com/viewjob?jk=abcdef0123456789', postedAt: '2020-01-01' },
+    { id: 'closed', title: 'Closed engineer', company: 'Fixture', stage: 'Closed', url: 'https://www.linkedin.com/jobs/view/102/' },
+    { id: 'employer', title: 'Employer role', company: 'Fixture', stage: 'Saved', url: 'https://example.org/role', source: 'AI LinkedIn search' },
+    { id: 'unknown', title: 'Manual role', company: 'Fixture', stage: 'Saved' },
+    { id: 'lookalike', title: 'Other role', company: 'Fixture', stage: 'Saved', url: 'https://linkedin.com.example.org/role' }
+  ];
+  const before = structuredClone(jobs);
+  const { document, dom, calls, state } = await setup(t, 'pipeline', jobs, { scans: [{ id: 'last', status: 'completed', newJobIds: ['indeed'] }] });
+  const source = value => document.querySelector('[data-action="offer-source"][data-source="' + value + '"]').click();
+  const change = (selector, value) => { const el=document.querySelector(selector); el.value=value; el.dispatchEvent(new dom.window.Event('change', { bubbles:true })); };
+  const shown = () => [...document.querySelectorAll('#jobs-area [data-action="edit-job"]')].map(el => el.dataset.id).sort();
+  assert.equal(document.querySelector('[data-source="all"]').getAttribute('aria-pressed'), 'true');
+  assert.equal(shown().length, 6);
+  document.querySelector('#select-visible-offers').click();
+  source('linkedin'); assert.deepEqual(shown(), ['linked']);
+  source('indeed'); assert.deepEqual(shown(), ['indeed', 'older']);
+  assert.equal(document.querySelectorAll('[data-select-job]:checked').length, 0);
+  assert.equal(document.querySelector('[data-source="indeed"]').getAttribute('aria-pressed'), 'true');
+  assert.equal(document.querySelector('[data-source="linkedin"]').getAttribute('aria-pressed'), 'false');
+  change('#job-posted', '30'); assert.deepEqual(shown(), ['indeed']);
+  document.querySelector('[data-action="last-search-filter"]').click(); assert.deepEqual(shown(), ['indeed']);
+  source('linkedin'); assert.deepEqual(shown(), []);
+  document.querySelector('[data-action="last-search-filter"]').click();
+  change('#job-posted', 'all'); change('#stage-filter', 'Closed'); assert.deepEqual(shown(), ['closed']);
+  change('#stage-filter', 'Saved'); source('indeed');
+  document.querySelector('[data-action="board-view"]').click();
+  assert.deepEqual([...document.querySelectorAll('.job-card-open')].map(el=>el.dataset.id).sort(), ['indeed','older']);
+  document.querySelector('[data-action="list-view"]').click(); assert.deepEqual(shown(), ['indeed','older']);
+  source('all'); assert.equal(shown().length, 6);
+  assert.deepEqual(state.jobs, before); assert.equal(calls.some(c => c.method !== 'GET'), false);
+});
+
+test('Offers selection is on the right, closes only checked offers once and keeps notes', async t => {
+  const { document, calls, state, network } = await setup(t, 'pipeline', selectableJobs());
+  const box = document.querySelector('[data-select-job="one"]');
+  assert.equal(box.closest('td'), box.closest('tr').lastElementChild);
+  assert.equal(box.getAttribute('aria-label'), 'Select offer: Junior <Engineer> at Fixture');
+  assert.equal(document.querySelector('#bulk-offer-actions').hidden, true);
+  box.click(); document.querySelector('[data-select-job="two"]').click();
+  assert.equal(document.querySelector('#select-visible-offers').indeterminate, true);
+  assert.equal(document.querySelector('#selected-offer-count').textContent, '2 offers selected');
+  let release; network.bulkCloseWait = new Promise(resolve => { release = resolve; });
+  const button = document.querySelector('[data-action="close-selected"]'); button.click(); button.click();
+  assert.equal(button.disabled, true); assert.equal(box.disabled, true);
+  assert.equal(calls.filter(c => c.path === '/api/jobs/close-selected').length, 1);
+  release();
+  await settle(() => !document.querySelector('[data-select-job="one"]'));
+  assert.deepEqual(calls.find(c => c.path === '/api/jobs/close-selected').body, { jobs: [
+    { id: 'one', expectedUrl: 'https://example.org/1', expectedStage: 'Saved' },
+    { id: 'two', expectedUrl: 'https://example.org/2', expectedStage: 'Saved' }
+  ] });
+  assert.equal(state.jobs.find(j => j.id === 'three').stage, 'Saved');
+  assert.equal(state.jobs.find(j => j.id === 'one').notes, 'Keep'); assert.equal(state.jobs.length, 5);
+  assert.equal(calls.some(c => c.method === 'DELETE'), false);
+});
+
+test('Offers select-all is limited to visible active rows and filtering clears hidden selections', async t => {
+  const { document, dom, calls } = await setup(t, 'pipeline', selectableJobs());
+  const change = (selector, value) => { const el = document.querySelector(selector); el.value = value; el.dispatchEvent(new dom.window.Event('change', { bubbles: true })); };
+  change('#stage-filter', 'All stages');
+  assert.equal(document.querySelector('[data-select-job="closed"]'), null);
+  assert.equal(document.querySelector('[data-select-job="expired"]'), null);
+  document.querySelector('#select-visible-offers').click();
+  assert.equal(document.querySelector('#selected-offer-count').textContent, '3 offers selected');
+  change('#job-sort', 'newest');
+  assert.equal(document.querySelector('#select-visible-offers').checked, true);
+  const search = document.querySelector('#search'); search.value = 'Data Scientist'; search.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  assert.equal(document.querySelector('#selected-offer-count').textContent, '1 offer selected');
+  search.value = ''; search.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  assert.equal(document.querySelector('[data-select-job="one"]').checked, false);
+  document.querySelector('[data-action="close-selected"]').click();
+  await settle(() => calls.some(c => c.path === '/api/jobs/close-selected'));
+  assert.deepEqual(calls.find(c => c.path === '/api/jobs/close-selected').body.jobs.map(j => j.id), ['two']);
+});
+
+test('Offers keeps selection on failure, permits retry and drops stale selections on refresh', async t => {
+  const { document, calls, state, network, poll } = await setup(t, 'pipeline', selectableJobs(), { scans: [{ id: 'run', status: 'running' }] });
+  document.querySelector('[data-select-job="one"]').click();
+  network.jobPatchError = 'A selected offer changed. No offers were closed.';
+  document.querySelector('[data-action="close-selected"]').click();
+  await settle(() => !document.querySelector('[data-action="close-selected"]').disabled);
+  assert.match(document.querySelector('#toast').textContent, /No offers were closed/);
+  assert.equal(document.querySelector('[data-select-job="one"]').checked, true);
+  state.jobs.find(j => j.id === 'one').url = 'https://example.org/changed';
+  state.jobs.push({ id: 'new', title: 'New engineer', company: 'Fixture', stage: 'Saved' });
+  document.activeElement.blur(); await poll();
+  assert.equal(document.querySelector('[data-select-job="one"]').checked, false);
+  assert.equal(document.querySelector('[data-select-job="new"]').checked, false);
+  assert.equal(document.querySelector('#bulk-offer-actions').hidden, true);
+  network.jobPatchError = ''; document.querySelector('[data-select-job="two"]').click();
+  document.querySelector('[data-action="close-selected"]').click();
+  await settle(() => !document.querySelector('[data-select-job="two"]'));
+  assert.equal(calls.filter(c => c.path === '/api/jobs/close-selected').length, 2);
+});
+
 for (const layout of ['list', 'board']) test(`Applications ${layout} closes an offer directly and can reopen it without deleting history`, async t => {
   const job = { id: 'close-me', title: 'Junior <Engineer>', company: 'Acme', location: 'Rabat', source: 'Manual', stage: 'Saved', notes: 'Not my domain.', description: 'Develop software in Python.' };
   const { dom, document, calls, state } = await setup(t, 'pipeline', [job]);

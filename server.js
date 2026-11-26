@@ -337,6 +337,24 @@ export function createApp({ dbPath = resolve('data/jobos.sqlite'), cvPath = reso
         if (path === '/api/capture' && req.headers['x-jobos-token'] !== store.get('settings', 'main').token) return send(401, { error: 'Pair the extension with the token in Settings.' });
         const result = ingest(body); return send(result.created ? 201 : 200, result);
       }
+      if (path === '/api/jobs/close-selected' && req.method === 'POST') {
+        if (req.headers['x-jobos-token'] !== store.get('settings', 'main').token) return send(401, { error: 'JobOS token required to close offers.' });
+        const selected = body.jobs;
+        if (!Array.isArray(selected) || !selected.length || selected.some(j => !j || typeof j.id !== 'string' || typeof j.expectedUrl !== 'string' || typeof j.expectedStage !== 'string') || new Set(selected.map(j => j.id)).size !== selected.length) throw Error('Select one or more distinct offers to close.');
+        store.db.exec('BEGIN IMMEDIATE');
+        try {
+          const jobs = selected.map(item => {
+            const job = store.get('jobs', item.id);
+            if (!job || job.stage === 'Closed' || job.expiredAt || (job.url || '') !== item.expectedUrl || job.stage !== item.expectedStage) throw Object.assign(Error('A selected offer changed. Refresh the list and check your selection again. No offers were closed.'), { status: 409 });
+            return job;
+          });
+          const updatedAt = new Date().toISOString();
+          for (const job of jobs) store.put('jobs', { ...job, stage: 'Closed', updatedAt });
+          store.db.exec('COMMIT');
+          excludedCache = undefined;
+          return send(200, { closed: jobs.length, jobIds: jobs.map(j => j.id) });
+        } catch (error) { store.db.exec('ROLLBACK'); throw error; }
+      }
       const item = path.match(/^\/api\/(jobs|contacts|reminders|alerts)\/([^/]+)$/);
       if (item) {
         const [, kind, id] = item, existing = store.get(kind, id);

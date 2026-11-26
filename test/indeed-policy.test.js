@@ -34,6 +34,38 @@ test('Indeed scope excludes advanced titles and explicit requirements without co
   }
 });
 
+test('Indeed reads actual technical duties and rejects company-blurb, teaching, management and seniority false positives', () => {
+  const rejected = [
+    { title: 'Supply Chain Quality & Data Engineer', description: "Description de l'entreprise\nWe build machine learning solutions.\nDescription du poste\nAnalyse supplier quality and maintain Excel stock dashboards.\nQualifications\nIndustrial engineering and supply chain knowledge." },
+    { title: 'Formateur en Intelligence Artificielle', description: 'Develop artificial intelligence training courses and teach students how to use AI tools.' },
+    { title: 'Office assistant', description: 'About the role\nSchedule meetings and prepare invoices.\nAbout us\nWe build machine learning platforms.' },
+    { title: 'Chef de Projet Data & IA', description: 'Pilotage du projet. Build data pipelines with the team. Bac+5 avec 8 à 12 ans d’expérience.' },
+    { title: 'GLOBAL IT DATA PROFESSIONAL', description: 'We are looking for senior data engineers.\nDesign and build data pipelines.\nRequirements\n8 years of work experience in IT.' },
+    { title: 'Data Engineer', description: 'Build data pipelines.\nRequirements:\n5+ years of relevant experience.' }
+  ];
+  for (const input of rejected) assert.equal(selectSearchMatches({jobs:[{...source,...input}],summary:''},preferences).jobs.length,0,input.title);
+  const accepted = [
+    { title:'Data Engineer',description:'Build and maintain ETL data pipelines with Python and SQL.' },
+    { title:'Junior AI Engineer',description:'Description du poste\nDévelopper des agents IA pour les utilisateurs.\nQualifications\nPrevious internships count as experience.' },
+    { title:'Full-stack Developer',description:'Build React interfaces and Node.js APIs for our software product.' },
+    { title:'Junior ML Engineer',description:'Train and deploy machine learning models with PyTorch.' },
+    { title:'Data Scientist',description:'Build predictive models with Python. Work with senior engineers.' }
+  ];
+  for (const input of accepted) assert.equal(selectSearchMatches({jobs:[{...source,...input}],summary:''},preferences).jobs.length,1,input.title);
+});
+
+test('streamed and final provider ingestion cap Indeed at 100 matches while keeping LinkedIn unrestricted', async () => {
+  const saved=[], calls=[];
+  const result=await performAutomatedScan({settings:{indeedOpportunityScope:INDEED_MOROCCO_SCOPE},knownJobs:[],
+    search:async(p,batch)=>{calls.push(p.jobSite);const jobs=Array.from({length:105},(_,i)=>({...source,url:p.jobSite==='indeed'?'https://www.indeed.com/viewjob?jk='+i.toString(16).padStart(16,'0'):'https://www.linkedin.com/jobs/view/'+(1000+i)+'/'}));batch(jobs.slice(0,60));batch(jobs);return {jobs,summary:'Fixture'};},
+    saveJob:j=>{const job={...j,id:String(saved.length)};saved.push(job);return {job,created:true};}});
+  assert.deepEqual(calls,['linkedin','indeed']);
+  assert.equal(saved.filter(j=>j.url.includes('linkedin')).length,105);
+  assert.equal(saved.filter(j=>j.url.includes('indeed')).length,100);
+  assert.equal(result.sourceResults.at(-1).limitReached,true);
+  assert.equal(result.newJobIds.length,205);
+});
+
 test('remote Indeed roles require junior evidence and cannot have known foreign-only eligibility', () => {
   const remote = { ...source, title: 'Junior Data Scientist', location: 'Remote' };
   assert.equal(indeedScopeDecision(remote).allowed, true);

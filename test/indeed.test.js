@@ -8,6 +8,8 @@ import { searchPreferences, discoveryPrompt, validateDiscovery, checkDiscoverySo
 import { createIndeedPublicSearch, parseIndeedListings } from '../lib/indeed-public-search.js';
 import { createAIBackend } from '../lib/ai.js';
 import { updateAIConfig, credentialStore } from '../lib/ai-config.js';
+import { searchWithCodex } from '../lib/codex.js';
+import { writeFile } from 'node:fs/promises';
 
 const key = i => (1000 + i).toString(16).padStart(16, '0');
 const url = i => `https://www.indeed.com/viewjob?jk=${key(i)}`;
@@ -86,4 +88,25 @@ test('local Indeed discovery saves verified jobs only, skips deleted IDs and doe
   const result = await backend.search({ ...preferences, excludedUrls: [`https://ma.indeed.com/viewjob?jk=${key(1)}&from=old`] });
   assert.equal(result.jobs.length, 1); assert.equal(result.jobs[0].url, url(0)); assert.equal(result.jobs[0].source, 'AI Indeed search');
   assert.ok(result.warnings.some(warning => /Indeed posting.*unreadable/.test(warning))); assert.ok(calls.length);
+});
+
+test('local provider stops discovery queries at 100 matching Indeed offers across coverage passes', async () => {
+  let queries=0; const batches=[];
+  const config=updateAIConfig({}, {provider:'ollama',searchProvider:'ollama'});
+  const backend=createAIBackend(config,credentialStore(null,{OLLAMA_API_KEY:'SYNTHETIC_KEY'}),{
+    fetcher:async endpoint=>{assert.equal(endpoint,'https://ollama.com/api/web_search');queries++;return new Response(JSON.stringify({results:Array.from({length:110},(_,i)=>({title:'Junior Software Engineer '+i,url:url(i),content:description}))}));},
+    fetchText:async value=>({url:value,text:page(Number.parseInt(new URL(value).searchParams.get('jk'),16)-1000)})
+  });
+  const result=await backend.search({...preferences,includeReview:true},batch=>batches.push(...batch));
+  assert.equal(result.jobs.length,100);assert.equal(batches.length,100);assert.equal(queries,1);
+  assert.match(result.warnings.join(' '),/100 matching offers/);
+});
+
+test('Codex discovery also caps matching Indeed results and avoids an extra coverage pass', async () => {
+  let calls=0;const batch=[];
+  const result=await searchWithCodex({...preferences,includeReview:true},async args=>{
+    calls++;await writeFile(args[args.indexOf('--output-last-message')+1],JSON.stringify({summary:'Synthetic result',jobs:Array.from({length:110},(_,i)=>({title:'Junior Software Engineer',company:'Fixture',location:'Morocco',url:url(i),description,evidence:'Synthetic source excerpt for this vacancy.',postedAt:new Date().toISOString()}))}));return {code:0};
+  },async result=>({...result,jobs:result.jobs.map(j=>({...j,verification:'found on public posting'}))}),rows=>batch.push(...rows));
+  assert.equal(calls,1);assert.equal(result.jobs.length,100);assert.equal(batch.length,100);
+  assert.match(result.warnings.join(' '),/100 matching offers/);
 });

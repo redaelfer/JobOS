@@ -124,6 +124,53 @@ test('bulk close uses only visible matches from the completed review and recheck
   assert.equal(store.get('jobs', applied.id).notes, 'Interview notes');
   assert.equal(ingest(saved).job.stage, 'Closed');
 });
+test('selected offers close together, retain their records and contacts, and stay closed on rediscovery', async t => {
+  const { request, ingest, store } = await setup(t);
+  const add = (id, stage = 'Saved') => ingest({ title: 'Junior Data Engineer', company: 'Fixture', notes: 'Keep my notes', stage, url: `https://www.linkedin.com/jobs/view/${id}/` }).job;
+  const first = add(811), second = add(812, 'Applied'), other = add(813);
+  store.put('contacts', { id: 'recruiter', company: 'Fixture', name: 'Synthetic recruiter', email: 'jobs@example.org' });
+  store.put('companies', { id: 'fixture', name: 'Fixture', notes: 'Keep company evidence' });
+  store.put('tailorings', { id: 'draft', jobId: first.id, status: 'completed' });
+  const kept = ['contacts', 'companies', 'tailorings', 'dismissedJobs'].map(kind => store.list(kind));
+  const token = { 'X-JobOS-Token': store.get('settings', 'main').token };
+  const body = { jobs: [first, second].map(j => ({ id: j.id, expectedUrl: j.url, expectedStage: j.stage })) };
+  assert.equal((await request('/api/jobs/close-selected', 'POST', body)).status, 401);
+  assert.deepEqual(store.get('jobs', first.id), first);
+  const result = await request('/api/jobs/close-selected', 'POST', body, token);
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body, { closed: 2, jobIds: [first.id, second.id] });
+  for (const before of [first, second]) {
+    const { stage, updatedAt, ...after } = store.get('jobs', before.id);
+    const { stage: oldStage, updatedAt: oldTime, ...original } = before;
+    assert.equal(stage, 'Closed'); assert.deepEqual(after, original);
+    assert.equal(ingest({ ...before, url: before.url + '?trackingId=new', descriptionVerified: true }).job.stage, 'Closed');
+  }
+  assert.deepEqual(store.get('jobs', other.id), other);
+  assert.deepEqual(['contacts', 'companies', 'tailorings', 'dismissedJobs'].map(kind => store.list(kind)), kept);
+  assert.equal(add(814).stage, 'Saved'); // Same title/company, distinct posting.
+});
+
+test('selected closing rejects stale or invalid selections atomically', async t => {
+  const { request, ingest, store } = await setup(t);
+  const first = ingest({ title: 'Engineer', company: 'Fixture', url: 'https://example.org/first' }).job;
+  const second = ingest({ title: 'Engineer', company: 'Fixture', url: 'https://example.org/second' }).job;
+  const token = { 'X-JobOS-Token': store.get('settings', 'main').token };
+  const items = [first, second].map(j => ({ id: j.id, expectedUrl: j.url, expectedStage: j.stage }));
+  const close = body => request('/api/jobs/close-selected', 'POST', body, token);
+  for (const change of [{ url: 'https://example.org/changed' }, { stage: 'Applied' }, { stage: 'Closed' }, { expiredAt: new Date().toISOString() }, null]) {
+    if (change) store.put('jobs', { ...second, ...change }); else store.remove('jobs', second.id);
+    const result = await close({ jobs: items });
+    assert.equal(result.status, 409); assert.match(result.body.error, /No offers were closed/);
+    assert.deepEqual(store.get('jobs', first.id), first);
+  }
+  store.put('jobs', second);
+  for (const body of [{}, { jobs: [] }, { jobs: [items[0], items[0]] }, { jobs: [{ id: first.id }] }, { jobs: [null] }]) {
+    assert.equal((await close(body)).status, 400);
+    assert.deepEqual(store.get('jobs', first.id), first);
+  }
+  assert.equal((await close({ jobs: items })).status, 200); // Failed transactions leave the connection usable.
+});
+
 test('job lifecycle: create, duplicate, stage updates, notes, delete', async t => {
   const { request } = await setup(t);
   const input = { title: 'Developer', company: 'Acme', url: 'https://www.linkedin.com/jobs/view/55/?trackingId=a' };

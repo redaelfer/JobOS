@@ -1,4 +1,13 @@
 const timestamp = value => Number.isFinite(Date.parse(value)) ? Date.parse(value) : 0;
+export function matchesOfferSource(job, selected = 'all') {
+  if (selected === 'all') return true;
+  try {
+    const url = new URL(job.url);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return false;
+    return (selected === 'linkedin' && /(^|\.)linkedin\.com$/i.test(url.hostname))
+      || (selected === 'indeed' && /(^|\.)indeed\.com$/i.test(url.hostname));
+  } catch { return false; }
+}
 export function postingTime(job) {
   const raw = String(job.postedAt || '').trim();
   if (!raw) return 0;
